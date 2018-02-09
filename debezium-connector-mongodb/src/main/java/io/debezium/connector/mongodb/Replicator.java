@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
+import com.mongodb.BasicDBObject;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.bson.BsonTimestamp;
@@ -469,6 +470,12 @@ public class Replicator {
             if (collectionFilter.test(collectionId)) {
                 RecordsForCollection factory = recordMakers.forCollection(collectionId);
                 try {
+                    // if event is for $set operation, then switch the "o" with current document state and put $set value into serialized json field for reference
+                    // this is solution for consumers, that cannot reconstruct state from events and relies on last transactions (head)
+                    if (event.get("o", Document.class).containsKey("$set")) {
+                        this.enrichSetTransaction(event, dbName, collectionName);
+                    }
+
                     factory.recordEvent(event, clock.currentTimeInMillis());
                 } catch (InterruptedException e) {
                     Thread.interrupted();
@@ -477,6 +484,29 @@ public class Replicator {
             }
         }
         return true;
+    }
+
+    private void enrichSetTransaction(Document event, String dbName, String collectionName) {
+        primaryClient.execute("get current doc", client -> {
+            Object id = event.get("o2", Document.class).get("_id");
+            BasicDBObject query = new BasicDBObject();
+            query.put("_id", id);
+
+            Document current = client
+                    .getDatabase(dbName)
+                    .getCollection(collectionName)
+                    .find(query).first();
+
+            // in case document is no longer available, create stub for it not to loose transaction
+            if (current == null) {
+                current = new Document();
+                current.append("_id", id);
+            }
+
+            Document set = event.get("o", Document.class);
+            current.append("_set", set.get("$set", Document.class).toJson());
+            event.put("o", current);
+        });
     }
 
     /**
