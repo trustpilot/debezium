@@ -54,6 +54,10 @@ public class FilterFieldsFromMongoDbEnvelope<R extends ConnectRecord<R>> impleme
 
     @Override
     public R apply(R r) {
+        if (r.value() == null) {
+            return r;
+        }
+
         Struct doc = (Struct) r.value();
 
         if (doc.get("after") != null) {
