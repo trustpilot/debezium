@@ -82,6 +82,17 @@ public class FilterFieldsFromMongoDbEnvelopeTest {
     }
 
     @Test
+    public void shouldNotTransformRecordForTombstoneEvent() {
+        final Map<String, String> props = new HashMap<>();
+        transformation.configure(props);
+
+        final SourceRecord tombstone = new SourceRecord(new HashMap<>(), new HashMap<>(), "dummy", null, null);
+        SourceRecord record = transformation.apply(tombstone);
+        assertThat(record).isNotNull();
+        transformation.close();
+    }
+
+    @Test
     public void shouldTransformRecordRemovingBlacklistedNestedFieldForInsertEvent() throws InterruptedException {
         ObjectId id = new ObjectId();
         Document after = new Document().append("_id", id)
