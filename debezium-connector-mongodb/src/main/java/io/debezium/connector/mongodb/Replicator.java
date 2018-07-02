@@ -5,10 +5,7 @@
  */
 package io.debezium.connector.mongodb;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Queue;
+import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -413,6 +410,7 @@ public class Replicator {
      * @return {@code true} if additional events should be processed, or {@code false} if the caller should stop
      *         processing events
      */
+
     protected boolean handleOplogEvent(ServerAddress primaryAddress, Document event) {
         logger.debug("Found event: {}", event);
         String ns = event.getString("ns");
@@ -473,10 +471,11 @@ public class Replicator {
                     // if event is for $set operation, then switch the "o" with current document state and put $set value into serialized json field for reference
                     // this is solution for consumers, that cannot reconstruct state from events and relies on last transactions (head)
                     if (event.get("o", Document.class).containsKey("$set")) {
-                        this.enrichSetTransaction(event, dbName, collectionName);
+                        factory.recordEvent(this.enrichSetTransaction(event, dbName, collectionName), clock.currentTimeInMillis());
+                    } else  {
+                        factory.recordEvent(event, clock.currentTimeInMillis());
                     }
 
-                    factory.recordEvent(event, clock.currentTimeInMillis());
                 } catch (InterruptedException e) {
                     Thread.interrupted();
                     return false;
@@ -486,7 +485,10 @@ public class Replicator {
         return true;
     }
 
-    private void enrichSetTransaction(Document event, String dbName, String collectionName) {
+    private Document enrichSetTransaction(Document event, String dbName, String collectionName) {
+        // "disconnect" from Mongo driver in order to prevent large memory leak, that occurs putting large documents into ongoing event
+        Document e = Document.parse(event.toJson());
+
         primaryClient.execute("get current doc", client -> {
             Object id = event.get("o2", Document.class).get("_id");
             BasicDBObject query = new BasicDBObject();
@@ -505,8 +507,10 @@ public class Replicator {
 
             Document set = event.get("o", Document.class);
             current.append("_set", set.get("$set", Document.class).toJson());
-            event.put("o", current);
+            e.put("o", current);
         });
+
+        return e;
     }
 
     /**
