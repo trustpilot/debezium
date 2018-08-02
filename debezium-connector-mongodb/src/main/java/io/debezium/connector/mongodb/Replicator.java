@@ -438,7 +438,13 @@ public class Replicator {
                     logger.info("Found new primary event in oplog, so stopping use of {} to continue with new primary",
                             primaryAddress);
                     // There is a new primary, so stop using this server and instead use the new primary ...
-                    return false;
+
+                    // TRUSTPILOT QUICK FIX:
+                    //   - if false is returned executor stops working. It's only intended to be called on STOP/EXIT.
+                    //return false;
+                    throw new MongoPrimaryChangedException(String.format(
+                            "Found new primary event in oplog, so stopping use of {} to continue with new primary"
+                            , primaryAddress));
                 } else {
                     logger.info("Found new primary event in oplog, current {} is new primary. " +
                                 "Continue to process oplog event.", primaryAddress);
@@ -484,6 +490,8 @@ public class Replicator {
         }
         return true;
     }
+
+
 
     private Document enrichSetTransaction(Document event, String dbName, String collectionName) {
         // "disconnect" from Mongo driver in order to prevent large memory leak, that occurs putting large documents into ongoing event
