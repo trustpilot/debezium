@@ -485,8 +485,8 @@ public class Replicator {
     }
 
     // If event is one of the MongoDB's update operators:
-    // then extend the "o" property with current document state and put ${update_operator} value into serialized json field '_updateOperators' for reference
-    // this is solution for consumers, that cannot reconstruct state from events and relies on last transactions (head)
+    // then extend the "o" property with current document state and put ${update_operator} value into serialized json field '_oplog_o' for reference.
+    // This is solution required to support consumers, that cannot reconstruct state from events and relies on last transactions (state).
     private void recordEvent(Document event, String dbName, String collectionName, RecordsForCollection factory) throws InterruptedException {
         Document eventToRecord = event;
 
