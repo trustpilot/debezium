@@ -440,8 +440,8 @@ public class Replicator {
                     // There is a new primary, so stop using this server and instead use the new primary ...
 
                     // TRUSTPILOT QUICK FIX:
-                    //   - if false is returned executor stops working. It's only intended to be called on STOP/EXIT.
-                    //return false;
+                    //   - if false is returned executor stops working, because it's only intended to be called on
+                    //  STOP/EXIT.
                     throw new MongoPrimaryChangedException(String.format(
                             "Found new primary event in oplog, so stopping use of {} to continue with new primary"
                             , primaryAddress));
@@ -474,14 +474,7 @@ public class Replicator {
             if (collectionFilter.test(collectionId)) {
                 RecordsForCollection factory = recordMakers.forCollection(collectionId);
                 try {
-                    // if event is for $set operation, then switch the "o" with current document state and put $set value into serialized json field for reference
-                    // this is solution for consumers, that cannot reconstruct state from events and relies on last transactions (head)
-                    if (event.get("o", Document.class).containsKey("$set")) {
-                        factory.recordEvent(this.enrichSetTransaction(event, dbName, collectionName), clock.currentTimeInMillis());
-                    } else  {
-                        factory.recordEvent(event, clock.currentTimeInMillis());
-                    }
-
+                    recordEvent(event, dbName, collectionName, factory);
                 } catch (InterruptedException e) {
                     Thread.interrupted();
                     return false;
@@ -491,9 +484,45 @@ public class Replicator {
         return true;
     }
 
+    // If event is one of the MongoDB's update operators:
+    // https://docs.mongodb.com/manual/reference/operator/update-field/
+    // then extend the "o" property with current document state and put ${update_operator} value into serialized json field '_updateOperators' for reference
+    // this is solution for consumers, that cannot reconstruct state from events and relies on last transactions (head)
+    private void recordEvent(Document event, String dbName, String collectionName, RecordsForCollection factory) throws InterruptedException {
+        Document eventToRecord = event;
 
+        if (eventIsMongoDbUpdateOperator(event)) {
+            eventToRecord = this.enrichEvent(event, dbName, collectionName);
+        }
 
-    private Document enrichSetTransaction(Document event, String dbName, String collectionName) {
+        factory.recordEvent(eventToRecord, clock.currentTimeInMillis());
+    }
+
+    private static ArrayList<String> mongoDbUpdateOperators = new ArrayList<>(9);
+    static {
+        mongoDbUpdateOperators.add("$currentDate");
+        mongoDbUpdateOperators.add("$inc");
+        mongoDbUpdateOperators.add("$min");
+        mongoDbUpdateOperators.add("$max");
+        mongoDbUpdateOperators.add("$mul");
+        mongoDbUpdateOperators.add("$rename");
+        mongoDbUpdateOperators.add("$set");
+        mongoDbUpdateOperators.add("$setOnInsert");
+        mongoDbUpdateOperators.add("$unset");
+    }
+
+    private boolean eventIsMongoDbUpdateOperator(Document event){
+        Document o = event.get("o", Document.class);
+
+        for (String key : mongoDbUpdateOperators) {
+            if (o.keySet().contains(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Document enrichEvent(Document event, String dbName, String collectionName) {
         // "disconnect" from Mongo driver in order to prevent large memory leak, that occurs putting large documents into ongoing event
         Document e = Document.parse(event.toJson());
 
@@ -513,8 +542,16 @@ public class Replicator {
                 current.append("_id", id);
             }
 
-            Document set = event.get("o", Document.class);
-            current.append("_set", set.get("$set", Document.class).toJson());
+            Document updateOperators = event.get("o", Document.class);
+
+            // Store actual update operators for reference
+            current.append("_updateOperators", updateOperators.toJson());
+
+            // Backwards compatibility
+            if (updateOperators.keySet().contains("$set")) {
+                current.append("_set", updateOperators.get("$set", Document.class).toJson());
+            }
+
             e.put("o", current);
         });
 
