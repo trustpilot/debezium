@@ -498,16 +498,12 @@ public class Replicator {
         factory.recordEvent(eventToRecord, clock.currentTimeInMillis());
     }
 
-    private static ArrayList<String> mongoDbUpdateOperators = new ArrayList<>(9);
+    // Full list of Mongo update operators: https://docs.mongodb.com/manual/reference/operator/update-field/
+    // Most of them translates to $set in oplog.
+    // Except for $unset and $rename. Both of them use additional $unset command.
+    private static ArrayList<String> mongoDbUpdateOperators = new ArrayList<>(2);
     static {
-        mongoDbUpdateOperators.add("$currentDate");
-        mongoDbUpdateOperators.add("$inc");
-        mongoDbUpdateOperators.add("$min");
-        mongoDbUpdateOperators.add("$max");
-        mongoDbUpdateOperators.add("$mul");
-        mongoDbUpdateOperators.add("$rename");
         mongoDbUpdateOperators.add("$set");
-        mongoDbUpdateOperators.add("$setOnInsert");
         mongoDbUpdateOperators.add("$unset");
     }
 
@@ -527,7 +523,7 @@ public class Replicator {
         Document e = Document.parse(event.toJson());
 
         primaryClient.execute("get current doc", client -> {
-            Object id = event.get("o2", Document.class).get("_id");
+            Object id = e.get("o2", Document.class).get("_id");
             BasicDBObject query = new BasicDBObject();
             query.put("_id", id);
 
@@ -542,14 +538,13 @@ public class Replicator {
                 current.append("_id", id);
             }
 
-            Document updateOperators = event.get("o", Document.class);
+            // Add update operator as metadata
+            Document updateOperator = e.get("o", Document.class);
+            current.append("_oplog_o", updateOperator.toJson());
 
-            // Store actual update operators for reference
-            current.append("_updateOperators", updateOperators.toJson());
-
-            // Backwards compatibility
-            if (updateOperators.keySet().contains("$set")) {
-                current.append("_set", updateOperators.get("$set", Document.class).toJson());
+            // Backward compatibility
+            if (updateOperator.keySet().contains("$set")) {
+                 current.append("_set", updateOperator.get("$set", Document.class).toJson());
             }
 
             e.put("o", current);
