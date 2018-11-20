@@ -31,8 +31,24 @@ import io.debezium.jdbc.JdbcConfiguration;
 public final class TestHelper {
 
     protected static final String TEST_SERVER = "test_server";
+    protected static final String TEST_DATABASE = "test_database";
     protected static final String PK_FIELD = "pk";
     private static final String TEST_PROPERTY_PREFIX = "debezium.test.";
+
+    /**
+     * Key for schema parameter used to store DECIMAL/NUMERIC columns' precision.
+     */
+    static final String PRECISION_PARAMETER_KEY = "connect.decimal.precision";
+
+    /**
+     * Key for schema parameter used to store a source column's type name.
+     */
+    static final String TYPE_NAME_PARAMETER_KEY = "__debezium.source.column.type";
+
+    /**
+     * Key for schema parameter used to store a source column's type length.
+     */
+    static final String TYPE_LENGTH_PARAMETER_KEY = "__debezium.source.column.length";
 
     private TestHelper() {
     }
@@ -50,6 +66,7 @@ public final class TestHelper {
         return ReplicationConnection.builder(defaultJdbcConfig())
                                     .withPlugin(plugin)
                                     .withSlot(slotName)
+                                    .withTypeRegistry(getTypeRegistry())
                                     .dropSlotOnClose(dropOnClose)
                                     .build();
     }
@@ -69,6 +86,17 @@ public final class TestHelper {
      */
     public static PostgresConnection create() {
         return new PostgresConnection(defaultJdbcConfig());
+    }
+
+    /**
+     * Obtain a DB connection with a custom application name.
+     *
+     * @param appName the name of the application used for PostgreSQL diagnostics
+     *
+     * @return the PostgresConnection instance; never null
+     */
+    public static PostgresConnection create(String appName) {
+        return new PostgresConnection(defaultJdbcConfig().edit().with("ApplicationName", appName).build());
     }
 
     /**
@@ -107,6 +135,18 @@ public final class TestHelper {
                                       .map(schema -> "DROP SCHEMA IF EXISTS " + schema + " CASCADE;")
                                       .collect(Collectors.joining(lineSeparator));
         TestHelper.execute(dropStmts);
+        try {
+            TestHelper.executeDDL("init_database.ddl");
+        }
+        catch (Exception e) {
+            throw new IllegalStateException("Failed to initialize database", e);
+        }
+    }
+
+    public static TypeRegistry getTypeRegistry() {
+        try (final PostgresConnection connection = new PostgresConnection(defaultJdbcConfig())) {
+            return connection.getTypeRegistry();
+        }
     }
 
     protected static Set<String> schemaNames() throws SQLException {

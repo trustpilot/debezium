@@ -5,6 +5,8 @@
  */
 package io.debezium.config;
 
+import java.time.DateTimeException;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -46,6 +48,9 @@ import io.debezium.util.Strings;
  */
 @Immutable
 public final class Field {
+
+    public static final String INTERNAL_PREFIX = "internal.";
+
     /**
      * Create a set of fields.
      * 
@@ -235,6 +240,17 @@ public final class Field {
      */
     public static Field create(String name) {
         return new Field(name, null, null, null, null, null, null, null);
+    }
+
+    /**
+     * Create an immutable internal {@link Field} instance with the given property name.
+     * The name will be prefixed with {@code internal.} prefix.
+     *
+     * @param name the name of the field; may not be null
+     * @return the field; never null
+     */
+    public static Field createInternal(String name) {
+        return new Field(INTERNAL_PREFIX + name, null, null, null, null, null, null, null, null, null);
     }
 
     /**
@@ -1035,7 +1051,7 @@ public final class Field {
         int errors = 0;
         if (value != null) {
             try {
-                Strings.listOfRegex(value, Pattern.CASE_INSENSITIVE);
+                Strings.setOfRegex(value, Pattern.CASE_INSENSITIVE);
             } catch (PatternSyntaxException e) {
                 problems.accept(field, value, "A comma-separated list of valid regular expressions is expected, but " + e.getMessage());
                 ++errors;
@@ -1175,4 +1191,15 @@ public final class Field {
         return 0;
     }
 
+    public static int isZoneOffset(Configuration config, Field field, ValidationOutput problems) {
+        String value = config.getString(field);
+        if (value == null) return 0;
+        try {
+            ZoneOffset.of(value);
+        } catch (DateTimeException e) {
+            problems.accept(field, value, "A zone offset string representation is expected");
+            return 1;
+        }
+        return 0;
+    }
 }

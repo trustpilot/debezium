@@ -21,11 +21,14 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
+import org.apache.kafka.connect.errors.ConnectException;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
 import io.debezium.connector.postgresql.DecoderDifferences;
 import io.debezium.connector.postgresql.TestHelper;
+import io.debezium.jdbc.JdbcConnection.ResultSetMapper;
 import io.debezium.util.Clock;
 import io.debezium.util.Metronome;
 
@@ -39,7 +42,7 @@ public class ReplicationConnectionIT {
     @Before
     public void before() throws Exception {
         TestHelper.dropAllSchemas();
-        String statement = "CREATE SCHEMA public;" +
+        String statement = "CREATE SCHEMA IF NOT EXISTS public;" +
                            "CREATE TABLE table_with_pk (a SERIAL, b VARCHAR(30), c TIMESTAMP NOT NULL, PRIMARY KEY(a, c));" +
                            "CREATE TABLE table_without_pk (a SERIAL, b NUMERIC(5,2), c TEXT);";
         TestHelper.execute(statement);
@@ -61,7 +64,7 @@ public class ReplicationConnectionIT {
         }
     }
 
-    @Test(expected = IllegalStateException.class)
+    @Test(expected = ConnectException.class)
     public void shouldNotAllowMultipleReplicationSlotsOnTheSameDBSlotAndPlugin() throws Exception {
         // create a replication connection which should be dropped once it's closed
         try (ReplicationConnection conn1 = TestHelper.createForReplication("test1", true)) {
@@ -69,6 +72,41 @@ public class ReplicationConnectionIT {
             try (ReplicationConnection conn2 = TestHelper.createForReplication("test1", false)) {
                 conn2.startStreaming();
                 fail("Should not be able to create 2 replication connections on the same db, plugin and slot");
+            }
+        }
+    }
+
+    @Test
+    public void shouldCloseConnectionOnInvalidSlotName() throws Exception {
+        final int closeRetries = 60;
+        final int waitPeriod = 2_000;
+        final String slotQuery = "select count(*) from pg_stat_replication where state = 'startup'";
+        final ResultSetMapper<Integer> slotQueryMapper = rs -> {
+            rs.next();
+            return rs.getInt(1);
+        };
+        final int slotsBefore;
+
+        try (PostgresConnection connection = TestHelper.create()) {
+            slotsBefore = connection.queryAndMap(slotQuery, slotQueryMapper);
+        }
+
+        try (ReplicationConnection conn1 = TestHelper.createForReplication("test1-", true)) {
+            conn1.startStreaming();
+            fail("Invalid slot name should fail");
+        }
+        catch (Exception e) {
+            try (PostgresConnection connection = TestHelper.create()) {
+                final int slotsAfter = connection.queryAndMap(slotQuery, slotQueryMapper);
+                for (int retry = 1; retry <= closeRetries; retry++) {
+                    if (slotsAfter <= slotsBefore) {
+                        break;
+                    }
+                    if (retry == closeRetries) {
+                        Assert.fail("Connection should not be active");
+                    }
+                    Thread.sleep(waitPeriod);
+                }
             }
         }
     }

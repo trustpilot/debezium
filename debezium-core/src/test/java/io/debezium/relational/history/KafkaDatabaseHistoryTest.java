@@ -5,6 +5,10 @@
  */
 package io.debezium.relational.history;
 
+import static org.fest.assertions.Assertions.assertThat;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
 import java.io.File;
 import java.util.Map;
 
@@ -17,14 +21,10 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-import static org.fest.assertions.Assertions.assertThat;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-
 import io.debezium.config.Configuration;
 import io.debezium.kafka.KafkaCluster;
 import io.debezium.relational.Tables;
-import io.debezium.relational.ddl.DdlParser;
+import io.debezium.relational.ddl.LegacyDdlParser;
 import io.debezium.relational.ddl.DdlParserSql2003;
 import io.debezium.text.ParsingException;
 import io.debezium.util.Collect;
@@ -58,6 +58,7 @@ public class KafkaDatabaseHistoryTest {
                                   .deleteDataPriorToStartup(true)
                                   .deleteDataUponShutdown(true)
                                   .addBrokers(1)
+                                  .withKafkaConfiguration(Collect.propertiesOf("auto.create.topics.enable", "false"))
                                   .startup();
         history = new KafkaDatabaseHistory();
     }
@@ -107,8 +108,13 @@ public class KafkaDatabaseHistoryTest {
         // Should be able to call start more than once ...
         history.start();
 
-        DdlParser recoveryParser = new DdlParserSql2003();
-        DdlParser ddlParser = new DdlParserSql2003();
+        history.initializeStorage();
+
+        // Calling it another time to ensure we can work with the DB history topic already existing
+        history.initializeStorage();
+
+        LegacyDdlParser recoveryParser = new DdlParserSql2003();
+        LegacyDdlParser ddlParser = new DdlParserSql2003();
         ddlParser.setCurrentSchema("db1"); // recover does this, so we need to as well
         Tables tables1 = new Tables();
         Tables tables2 = new Tables();
@@ -126,7 +132,7 @@ public class KafkaDatabaseHistoryTest {
         ddl = "CREATE TABLE foo ( name VARCHAR(255) NOT NULL PRIMARY KEY); \n" +
                 "CREATE TABLE customers ( id INTEGER NOT NULL PRIMARY KEY, name VARCHAR(100) NOT NULL ); \n" +
                 "CREATE TABLE products ( productId INTEGER NOT NULL PRIMARY KEY, desc VARCHAR(255) NOT NULL); \n";
-        history.record(source, position, "db1", tables1, ddl);
+        history.record(source, position, "db1", ddl);
 
         // Parse the DDL statement 3x and each time update a different Tables object ...
         ddlParser.parse(ddl, tables1);
@@ -139,7 +145,7 @@ public class KafkaDatabaseHistoryTest {
         // Record a drop statement and parse it for 2 of our 3 Tables...
         setLogPosition(39);
         ddl = "DROP TABLE foo;";
-        history.record(source, position, "db1", tables2, ddl);
+        history.record(source, position, "db1", ddl);
         ddlParser.parse(ddl, tables2);
         assertThat(tables2.size()).isEqualTo(2);
         ddlParser.parse(ddl, tables3);
@@ -148,7 +154,7 @@ public class KafkaDatabaseHistoryTest {
         // Record another DDL statement and parse it for 1 of our 3 Tables...
         setLogPosition(10003);
         ddl = "CREATE TABLE suppliers ( supplierId INTEGER NOT NULL PRIMARY KEY, name VARCHAR(255) NOT NULL);";
-        history.record(source, position, "db1", tables3, ddl);
+        history.record(source, position, "db1", ddl);
         ddlParser.parse(ddl, tables3);
         assertThat(tables3.size()).isEqualTo(3);
 
@@ -247,13 +253,13 @@ public class KafkaDatabaseHistoryTest {
 
         testHistoryTopicContent(false);
     }
-    
+
     @Test
-    public void testExists() {          
+    public void testExists() {
         // happy path
-        testHistoryTopicContent(true);                
+        testHistoryTopicContent(true);
         assertTrue(history.exists());
-        
+
         // Set history to use dummy topic
         Configuration config = Configuration.create()
                 .with(KafkaDatabaseHistory.BOOTSTRAP_SERVERS, kafka.brokerList())
@@ -273,7 +279,8 @@ public class KafkaDatabaseHistoryTest {
                 .build();
 
         history.configure(config, null);
-        
+        history.start();
+
         // dummytopic should not exist yet
         assertFalse(history.exists());
     }

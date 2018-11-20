@@ -13,12 +13,12 @@ import io.debezium.relational.history.FileDatabaseHistory;
 
 /**
  * A helper for easily building connector configurations for testing.
- * 
+ *
  * @author Randall Hauch
  */
 public class Configurator {
 
-    private Configuration.Builder configBuilder = Configuration.create();
+    private final Configuration.Builder configBuilder = Configuration.create();
 
     public Configurator with(Field field, String value) {
         configBuilder.with(field, value);
@@ -85,7 +85,9 @@ public class Configurator {
      */
     public MySqlSchema createSchemas() {
         Configuration config = configBuilder.build();
-        return new MySqlSchema(config,config.getString(MySqlConnectorConfig.SERVER_NAME), null, false);
-    }
+        MySqlConnectorConfig connectorConfig = new MySqlConnectorConfig(config);
 
+        return new MySqlSchema(connectorConfig, null, false,
+                MySqlTopicSelector.defaultSelector(connectorConfig.getLogicalName(), "__debezium-heartbeat"));
+    }
 }

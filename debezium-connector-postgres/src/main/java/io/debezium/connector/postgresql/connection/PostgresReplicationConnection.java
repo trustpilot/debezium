@@ -25,6 +25,7 @@ import org.slf4j.LoggerFactory;
 
 import io.debezium.config.Configuration;
 import io.debezium.connector.postgresql.PostgresConnectorConfig;
+import io.debezium.connector.postgresql.TypeRegistry;
 import io.debezium.jdbc.JdbcConnection;
 import io.debezium.jdbc.JdbcConnectionException;
 
@@ -43,6 +44,7 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
     private final Configuration originalConfig;
     private final Integer statusUpdateIntervalMillis;
     private final MessageDecoder messageDecoder;
+    private final TypeRegistry typeRegistry;
 
     private long defaultStartingPos;
 
@@ -54,13 +56,15 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
      * @param plugin decoder matching the server side plug-in used for streaming changes; may not be null
      * @param dropSlotOnClose whether the replication slot should be dropped once the connection is closed
      * @param statusUpdateIntervalMillis the number of milli-seconds at which the replication connection should periodically send status
+     * @param typeRegistry registry with PostgreSQL types
      * updates to the server
      */
     private PostgresReplicationConnection(Configuration config,
                                          String slotName,
                                          PostgresConnectorConfig.LogicalDecoder plugin,
                                          boolean dropSlotOnClose,
-                                         Integer statusUpdateIntervalMillis) {
+                                         Integer statusUpdateIntervalMillis,
+                                         TypeRegistry typeRegistry) {
         super(config, PostgresConnection.FACTORY, null ,PostgresReplicationConnection::defaultSettings);
 
         this.originalConfig = config;
@@ -69,15 +73,22 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
         this.dropSlotOnClose = dropSlotOnClose;
         this.statusUpdateIntervalMillis = statusUpdateIntervalMillis;
         this.messageDecoder = plugin.messageDecoder();
+        this.typeRegistry = typeRegistry;
 
         try {
             initReplicationSlot();
-        } catch (SQLException e) {
-            throw new JdbcConnectionException("Cannot create replication connection", e);
+        }
+        catch (ConnectException e) {
+            close();
+            throw e;
+        }
+        catch (Throwable t) {
+            close();
+            throw new ConnectException("Cannot create replication connection", t);
         }
     }
 
-    protected void initReplicationSlot() throws SQLException {
+    protected void initReplicationSlot() throws SQLException, InterruptedException {
         final String postgresPluginName = plugin.getPostgresPluginName();
         ServerInfo.ReplicationSlot slotInfo;
         try (PostgresConnection connection = new PostgresConnection(originalConfig)) {
@@ -104,6 +115,9 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
             }
 
             AtomicLong xlogStart = new AtomicLong();
+            // replication connection does not support parsing of SQL statements so we need to create
+            // the connection without executing on connect statements - see JDBC opt preferQueryMode=simple
+            pgConnection();
             execute(statement -> {
                 String identifySystemStatement = "IDENTIFY_SYSTEM";
                 LOGGER.debug("running '{}' to validate replication connection", identifySystemStatement);
@@ -149,7 +163,7 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
     }
 
     protected PGConnection pgConnection() throws SQLException {
-        return (PGConnection) connection();
+        return (PGConnection) connection(false);
     }
 
     private ReplicationStream createReplicationStream(final LogSequenceNumber lsn) throws SQLException {
@@ -180,7 +194,7 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
             private volatile LogSequenceNumber lastReceivedLSN;
 
             @Override
-            public void read(ReplicationMessageProcessor processor) throws SQLException {
+            public void read(ReplicationMessageProcessor processor) throws SQLException, InterruptedException {
                 ByteBuffer read = stream.read();
                 // the lsn we started from is inclusive, so we need to avoid sending back the same message twice
                 if (lsnLong >= stream.getLastReceiveLSN().asLong()) {
@@ -190,7 +204,7 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
             }
 
             @Override
-            public void readPending(ReplicationMessageProcessor processor) throws SQLException {
+            public void readPending(ReplicationMessageProcessor processor) throws SQLException, InterruptedException {
                 ByteBuffer read = stream.readPending();
                 // the lsn we started from is inclusive, so we need to avoid sending back the same message twice
                 if (read == null ||  lsnLong >= stream.getLastReceiveLSN().asLong()) {
@@ -199,9 +213,9 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
                 deserializeMessages(read, processor);
             }
 
-            private void deserializeMessages(ByteBuffer buffer, ReplicationMessageProcessor processor) throws SQLException {
+            private void deserializeMessages(ByteBuffer buffer, ReplicationMessageProcessor processor) throws SQLException, InterruptedException {
                 lastReceivedLSN = stream.getLastReceiveLSN();
-                messageDecoder.processMessage(buffer, processor);
+                messageDecoder.processMessage(buffer, processor, typeRegistry);
             }
 
             @Override
@@ -279,13 +293,17 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
     public synchronized void close() {
         try {
             super.close();
-        } catch (SQLException e) {
+        }
+        catch (Throwable e) {
             LOGGER.error("Unexpected error while closing Postgres connection", e);
         }
         if (dropSlotOnClose) {
             // we're dropping the replication slot via a regular - i.e. not a replication - connection
             try (PostgresConnection connection = new PostgresConnection(originalConfig)) {
                 connection.dropReplicationSlot(slotName);
+            }
+            catch (Throwable e) {
+                LOGGER.error("Unexpected error while dropping replication slot", e);
             }
         }
     }
@@ -305,6 +323,7 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
         private PostgresConnectorConfig.LogicalDecoder plugin = PostgresConnectorConfig.LogicalDecoder.DECODERBUFS;
         private boolean dropSlotOnClose = DEFAULT_DROP_SLOT_ON_CLOSE;
         private Integer statusUpdateIntervalMillis;
+        private TypeRegistry typeRegistry;
 
         protected ReplicationConnectionBuilder(Configuration config) {
             assert config != null;
@@ -340,7 +359,13 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
         @Override
         public ReplicationConnection build() {
             assert plugin != null : "Decoding plugin name is not set";
-            return new PostgresReplicationConnection(config, slotName, plugin, dropSlotOnClose, statusUpdateIntervalMillis);
+            return new PostgresReplicationConnection(config, slotName, plugin, dropSlotOnClose, statusUpdateIntervalMillis, typeRegistry);
+        }
+
+        @Override
+        public Builder withTypeRegistry(TypeRegistry typeRegistry) {
+            this.typeRegistry = typeRegistry;
+            return this;
         }
     }
 }

@@ -7,12 +7,13 @@ package io.debezium.connector.mongodb;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.mongodb.MongoInterruptedException;
 
 import io.debezium.util.Clock;
 import io.debezium.util.Metronome;
@@ -23,11 +24,10 @@ import io.debezium.util.Metronome;
  * 
  * @author Randall Hauch
  */
-public final class ReplicaSetMonitorThread extends Thread {
+public final class ReplicaSetMonitorThread implements Runnable {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
     private final Metronome metronome;
-    private final AtomicBoolean running = new AtomicBoolean(false);
     private final CountDownLatch initialized = new CountDownLatch(1);
     private final Supplier<ReplicaSets> monitor;
     private final Consumer<ReplicaSets> onChange;
@@ -53,49 +53,44 @@ public final class ReplicaSetMonitorThread extends Thread {
 
     @Override
     public void run() {
-        if (running.compareAndSet(false, true)) {
-            // We were not running, but we are now ...
+        if (!Thread.currentThread().isInterrupted()) {
             onStartup.run();
-            while (running.get()) {
-                try {
-                    ReplicaSets previousReplicaSets = replicaSets;
-                    replicaSets = monitor.get();
-                    initialized.countDown();
-                    // Determine if any replica set specifications have changed ...
-                    if (replicaSets.haveChangedSince(previousReplicaSets)) {
-                        // At least one of the replica sets been added or been removed ...
-                        try {
-                            onChange.accept(replicaSets);
-                        } catch (Throwable t) {
-                            logger.error("Error while calling the function with the new replica set specifications", t);
-                        }
-                    }
-                } catch (Throwable t) {
-                    logger.error("Error while trying to get information about the replica sets", t);
-                }
-                // Check again whether we are running before we pause ...
-                if (running.get()) {
+        }
+
+        while (!Thread.currentThread().isInterrupted()) {
+            try {
+                ReplicaSets previousReplicaSets = replicaSets;
+                replicaSets = monitor.get();
+                initialized.countDown();
+                // Determine if any replica set specifications have changed ...
+                if (replicaSets.haveChangedSince(previousReplicaSets)) {
+                    // At least one of the replica sets been added or been removed ...
                     try {
-                        metronome.pause();
-                    } catch (InterruptedException e) {
-                        Thread.interrupted();
+                        onChange.accept(replicaSets);
+                    }
+                    catch (MongoInterruptedException t) {
+                        logger.error("Interrupted while calling the function with the new replica set specifications", t);
+                        Thread.currentThread().interrupt();
+                    }
+                    catch (Throwable t) {
+                        logger.error("Error while calling the function with the new replica set specifications", t);
                     }
                 }
             }
-        }
-    }
-
-    /**
-     * Requests that this thread stop running.
-     */
-    public void shutdown() {
-        if (running.compareAndSet(true, false)) {
-            logger.debug("Stopping the thread monitoring replica sets");
-            // We were running, so interrupt the thread if it is paused ...
-            try {
-                this.interrupt();
-            } catch (Throwable t) {
-                logger.warn("Unable to interrupt the thread monitoring replica sets", t);
+            catch (MongoInterruptedException t) {
+                logger.error("interrupted while trying to get information about the replica sets", t);
+                Thread.currentThread().interrupt();
+            }
+            catch (Throwable t) {
+                logger.error("Error while trying to get information about the replica sets", t);
+            }
+            // Check again whether we are running before we pause ...
+            if (!Thread.currentThread().isInterrupted()) {
+                try {
+                    metronome.pause();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
             }
         }
     }

@@ -6,10 +6,14 @@
 
 package io.debezium.connector.postgresql.connection.wal2json;
 
+import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.regex.Matcher;
 
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.errors.ConnectException;
@@ -26,15 +30,17 @@ import org.postgresql.util.PGmoney;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.debezium.connector.postgresql.PgOid;
+import io.debezium.connector.postgresql.PostgresType;
 import io.debezium.connector.postgresql.PostgresValueConverter;
 import io.debezium.connector.postgresql.RecordsStreamProducer.PgConnectionSupplier;
+import io.debezium.connector.postgresql.TypeRegistry;
 import io.debezium.connector.postgresql.connection.AbstractReplicationMessageColumn;
-import io.debezium.connector.postgresql.connection.AbstractReplicationMessageColumn.TypeMetadataImpl;
 import io.debezium.connector.postgresql.connection.ReplicationMessage;
+import io.debezium.data.SpecialValueDecimal;
 import io.debezium.document.Array;
 import io.debezium.document.Document;
 import io.debezium.document.Value;
+import io.debezium.time.Conversions;
 import io.debezium.util.Strings;
 
 /**
@@ -46,18 +52,20 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(Wal2JsonReplicationMessage.class);
 
-    private final int txId;
+    private final long txId;
     private final long commitTime;
     private final Document rawMessage;
     private final boolean hasMetadata;
-    final boolean lastEventForLsn;
+    private final boolean lastEventForLsn;
+    private final TypeRegistry typeRegistry;
 
-    public Wal2JsonReplicationMessage(final int txId, final long commitTime, final Document rawMessage, final boolean hasMetadata, boolean lastEventForLsn) {
+    public Wal2JsonReplicationMessage(long txId, long commitTime, Document rawMessage, boolean hasMetadata, boolean lastEventForLsn, TypeRegistry typeRegistry) {
         this.txId = txId;
         this.commitTime = commitTime;
         this.rawMessage = rawMessage;
         this.hasMetadata = hasMetadata;
         this.lastEventForLsn = lastEventForLsn;
+        this.typeRegistry = typeRegistry;
     }
 
     @Override
@@ -81,7 +89,7 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
     }
 
     @Override
-    public int getTransactionId() {
+    public long getTransactionId() {
         return txId;
     }
 
@@ -102,7 +110,7 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
     }
 
     @Override
-    public boolean hasMetadata() {
+    public boolean hasTypeMetadata() {
         return hasMetadata;
     }
 
@@ -119,28 +127,41 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
         final List<ReplicationMessage.Column> columns = new ArrayList<>(columnNames.size());
 
         for (int i = 0; i < columnNames.size(); i++) {
-            String columnName = columnNames.get(i).asString();
-            String columnType = columnTypes.get(i).asString();
-            boolean columnOptional = columnOptionals != null ? columnOptionals.get(i).asBoolean() : false;
-            Value rawValue = columnValues.get(i);
+            final String columnName = columnNames.get(i).asString();
+            final String columnTypeName = columnTypes.get(i).asString();
+            final boolean columnOptional = columnOptionals != null ? columnOptionals.get(i).asBoolean() : false;
+            final Value rawValue = columnValues.get(i);
+            final PostgresType columnType = typeRegistry.get(parseType(columnName, columnTypeName));
 
-            columns.add(new AbstractReplicationMessageColumn(columnName, columnType, columnOptional, true) {
+            columns.add(new AbstractReplicationMessageColumn(columnName, columnType, columnTypeName, columnOptional, true) {
 
                 @Override
                 public Object getValue(PgConnectionSupplier connection, boolean includeUnknownDatatypes) {
-                    return Wal2JsonReplicationMessage.this.getValue(columnName, getTypeMetadata(), rawValue, connection, includeUnknownDatatypes);
+                    return Wal2JsonReplicationMessage.this.getValue(columnName, columnType, columnTypeName, rawValue, connection, includeUnknownDatatypes);
                 }
 
-                @Override
-                public int doGetOidType() {
-                    return getTypeMetadata().isArray() ?
-                            PgOid.typeNameToOid(getTypeMetadata().getName().substring(1)) :
-                            PgOid.typeNameToOid(getTypeMetadata().getName());
-                }
             });
         }
 
         return columns;
+    }
+
+    private String parseType(String columnName, String typeWithModifiers) {
+        Matcher m = AbstractReplicationMessageColumn.TypeMetadataImpl.TYPE_PATTERN.matcher(typeWithModifiers);
+        if (!m.matches()) {
+            LOGGER.error("Failed to parse columnType for {} '{}'", columnName, typeWithModifiers);
+            throw new ConnectException(String.format("Failed to parse columnType '%s' for column %s", typeWithModifiers, columnName));
+        }
+        String baseType = m.group("base").trim();
+        final String suffix = m.group("suffix");
+        if (suffix != null) {
+            baseType += suffix;
+        }
+        baseType = TypeRegistry.normalizeTypeName(baseType);
+        if (m.group("array") != null) {
+            baseType = "_" + baseType;
+        }
+        return baseType;
     }
 
     /**
@@ -154,27 +175,26 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
      *
      * @return the value; may be null
      */
-    public Object getValue(String columnName, TypeMetadataImpl typeMetadata, Value rawValue, final PgConnectionSupplier connection, boolean includeUnknownDatatypes) {
+    public Object getValue(String columnName, PostgresType type, String fullType, Value rawValue, final PgConnectionSupplier connection, boolean includeUnknownDatatypes) {
         if (rawValue.isNull()) {
             // nulls are null
             return null;
         }
 
-        if (typeMetadata.isArray()) {
+        if (type.isArrayType()) {
             try {
                 final String dataString = rawValue.asString();
-                int arrayTypeOid = connection.get().getTypeInfo().getPGType(typeMetadata.getName());
-                PgArray arrayData = new PgArray(connection.get(), arrayTypeOid, dataString);
+                PgArray arrayData = new PgArray(connection.get(), type.getOid(), dataString);
                 Object deserializedArray = arrayData.getArray();
                 return Arrays.asList((Object[])deserializedArray);
             }
             catch (SQLException e) {
-                LOGGER.warn("Unexpected exception trying to process PgArray ({}) column '{}', {}", typeMetadata.getFullType(), columnName, e);
+                LOGGER.warn("Unexpected exception trying to process PgArray ({}) column '{}', {}", fullType, columnName, e);
             }
             return null;
         }
 
-        switch (typeMetadata.getBaseType()) {
+        switch (type.getName()) {
             // include all types from https://www.postgresql.org/docs/current/static/datatype.html#DATATYPE-TABLE
             // plus aliases from the shorter names produced by older wal2json
             case "boolean":
@@ -200,16 +220,24 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
 
             case "real":
             case "float4":
-                return rawValue.asFloat();
+                return rawValue.isNumber() ? rawValue.asFloat() : Float.valueOf(rawValue.asString());
 
             case "double precision":
             case "float8":
-                return rawValue.asDouble();
+                return rawValue.isNumber() ? rawValue.asDouble() : Double.valueOf(rawValue.asString());
 
             case "numeric":
             case "decimal":
-                // TODO: Support for Decimal/Numeric types with correct scale+precision
-                return rawValue.asDouble();
+                if (rawValue.isInteger()) {
+                    return new SpecialValueDecimal(new BigDecimal(rawValue.asInteger()));
+                }
+                else if (rawValue.isLong()) {
+                    return new SpecialValueDecimal(new BigDecimal(rawValue.asLong()));
+                }
+                else if (rawValue.isBigInteger()) {
+                    return new SpecialValueDecimal(new BigDecimal(rawValue.asBigInteger()));
+                }
+                return SpecialValueDecimal.valueOf(rawValue.asString());
 
             case "character":
             case "char":
@@ -228,7 +256,8 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
 
             case "timestamp":
             case "timestamp without time zone":
-                return DateTimeFormat.get().timestamp(rawValue.asString());
+                final LocalDateTime serverLocal = Conversions.fromNanosToLocalDateTimeUTC(DateTimeFormat.get().timestamp(rawValue.asString()));
+                return Conversions.toEpochNanos(serverLocal.toInstant(ZoneOffset.UTC));
 
             case "time":
             case "time without time zone":
@@ -342,22 +371,11 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
             // this includes things like PostGIS geometries or other custom types.
             // leave up to the downstream message recipient to deal with.
             LOGGER.debug("processing column '{}' with unknown data type '{}' as byte array", columnName,
-                    typeMetadata.getFullType());
+                    fullType);
             return rawValue.asString();
         }
-        LOGGER.debug("Unknown column type {} for column {} – ignoring", typeMetadata.getFullTypeWithSchema(), columnName);
+        LOGGER.debug("Unknown column type {} for column {} – ignoring", fullType, columnName);
         return null;
-    }
-
-    /**
-     * CHAR and VARCHAR are using internal name BPCHAR
-     *
-     * @param typeName
-     * @return the internal type name
-     */
-    private String toInternalTypeName(TypeMetadataImpl typeMetadata) {
-        final String fullTypeName = typeMetadata.getFullType();
-        return fullTypeName.startsWith("character") ? "bpchar" : fullTypeName;
     }
 
     @Override

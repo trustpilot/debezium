@@ -28,7 +28,7 @@ import org.slf4j.LoggerFactory;
 import io.debezium.config.Configuration;
 import io.debezium.config.Field;
 import io.debezium.data.Envelope;
-import io.debezium.util.AvroValidator;
+import io.debezium.util.SchemaNameAdjuster;
 import io.debezium.util.Strings;
 
 /**
@@ -101,7 +101,7 @@ public class ByLogicalTableRouter<R extends ConnectRecord<R>> implements Transfo
                 ". This will be used to create the physical table identifier in the record's key.");
 
     private static final Logger logger = LoggerFactory.getLogger(ByLogicalTableRouter.class);
-    private final AvroValidator schemaNameValidator = AvroValidator.create(logger);
+    private final SchemaNameAdjuster schemaNameAdjuster = SchemaNameAdjuster.create(logger);
     private Pattern topicRegex;
     private String topicReplacement;
     private Pattern keyFieldRegex;
@@ -109,6 +109,8 @@ public class ByLogicalTableRouter<R extends ConnectRecord<R>> implements Transfo
     private String keyFieldName;
     private final Cache<Schema, Schema> keySchemaUpdateCache = new SynchronizedCache<>(new LRUCache<Schema, Schema>(16));
     private final Cache<Schema, Schema> envelopeSchemaUpdateCache = new SynchronizedCache<>(new LRUCache<Schema, Schema>(16));
+    private final Cache<String, String> keyRegexReplaceCache = new SynchronizedCache<>(new LRUCache<String, String>(16));
+    private final Cache<String, String> topicRegexReplaceCache = new SynchronizedCache<>(new LRUCache<String, String>(16));
 
     /**
      * If KEY_FIELD_REGEX has a value that is really a regex, then the KEY_FIELD_REPLACEMENT must be a non-empty value.
@@ -235,11 +237,19 @@ public class ByLogicalTableRouter<R extends ConnectRecord<R>> implements Transfo
      * @return return the new topic name, if the regex applies. Otherwise, return null.
      */
     private String determineNewTopic(String oldTopic) {
-        final Matcher matcher = topicRegex.matcher(oldTopic);
-        if (matcher.matches()) {
-            return matcher.replaceFirst(topicReplacement);
+        String newTopic = topicRegexReplaceCache.get(oldTopic);
+        if (newTopic != null) {
+            return newTopic;
         }
-        return null;
+        else {
+            final Matcher matcher = topicRegex.matcher(oldTopic);
+            if (matcher.matches()) {
+                newTopic = matcher.replaceFirst(topicReplacement);
+                topicRegexReplaceCache.put(oldTopic, newTopic);
+                return newTopic;
+            }
+            return null;
+        }
     }
 
     private Schema updateKeySchema(Schema oldKeySchema, String newTopicName) {
@@ -249,7 +259,7 @@ public class ByLogicalTableRouter<R extends ConnectRecord<R>> implements Transfo
         }
 
         final SchemaBuilder builder = copySchemaExcludingName(oldKeySchema, SchemaBuilder.struct());
-        builder.name(schemaNameValidator.validate(newTopicName + ".Key"));
+        builder.name(schemaNameAdjuster.adjust(newTopicName + ".Key"));
 
         // Now that multiple physical tables can share a topic, the event's key may need to be augmented to include
         // fields other than just those for the record's primary/unique key, since these are not guaranteed to be unique
@@ -269,9 +279,16 @@ public class ByLogicalTableRouter<R extends ConnectRecord<R>> implements Transfo
 
         String physicalTableIdentifier = oldTopic;
         if (keyFieldRegex != null) {
-            final Matcher matcher = keyFieldRegex.matcher(oldTopic);
-            if (matcher.matches()) {
-                physicalTableIdentifier = matcher.replaceFirst(keyFieldReplacement);
+            physicalTableIdentifier = keyRegexReplaceCache.get(oldTopic);
+            if (physicalTableIdentifier == null) {
+                final Matcher matcher = keyFieldRegex.matcher(oldTopic);
+                if (matcher.matches()) {
+                    physicalTableIdentifier = matcher.replaceFirst(keyFieldReplacement);
+                    keyRegexReplaceCache.put(oldTopic, physicalTableIdentifier);
+                }
+                else {
+                    physicalTableIdentifier = oldTopic;
+                }
             }
         }
 
@@ -287,7 +304,7 @@ public class ByLogicalTableRouter<R extends ConnectRecord<R>> implements Transfo
 
         final Schema oldValueSchema = oldEnvelopeSchema.field(Envelope.FieldName.BEFORE).schema();
         final SchemaBuilder valueBuilder = copySchemaExcludingName(oldValueSchema, SchemaBuilder.struct());
-        valueBuilder.name(schemaNameValidator.validate(newTopicName + ".Value"));
+        valueBuilder.name(schemaNameAdjuster.adjust(newTopicName + ".Value"));
         final Schema newValueSchema = valueBuilder.build();
 
         final SchemaBuilder envelopeBuilder = copySchemaExcludingName(oldEnvelopeSchema, SchemaBuilder.struct(), false);
@@ -299,7 +316,7 @@ public class ByLogicalTableRouter<R extends ConnectRecord<R>> implements Transfo
             }
             envelopeBuilder.field(fieldName, fieldSchema);
         }
-        envelopeBuilder.name(schemaNameValidator.validate(newTopicName + ".Envelope"));
+        envelopeBuilder.name(schemaNameAdjuster.adjust(newTopicName + ".Envelope"));
 
         newEnvelopeSchema = envelopeBuilder.build();
         envelopeSchemaUpdateCache.put(oldEnvelopeSchema, newEnvelopeSchema);

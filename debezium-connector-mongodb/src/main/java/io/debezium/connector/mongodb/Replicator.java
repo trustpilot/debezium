@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Predicate;
+import java.util.function.Consumer;
 
 import com.mongodb.BasicDBObject;
 import org.apache.kafka.connect.errors.ConnectException;
@@ -68,7 +68,7 @@ import io.debezium.util.Threads;
  * <em>in the same order</em>, then the state of all documents described by this connector will be the same.
  *
  * <h2>Restart</h2>
- * If prior runs of the replicator have recorded offsets in the {@link ReplicationContext#source() source information}, then
+ * If prior runs of the replicator have recorded offsets in the {@link MongoDbTaskContext#source() source information}, then
  * when the replicator starts it will simply start reading the primary's oplog starting at the same point it last left off.
  *
  * <h2>Handling problems</h2>
@@ -76,7 +76,7 @@ import io.debezium.util.Threads;
  * This replicator does each of its tasks using a connection to the primary. If the replicator is not able to establish a
  * connection to the primary (e.g., there is no primary, or the replicator cannot communicate with the primary), the replicator
  * will continue to try to establish a connection, using an exponential back-off strategy to prevent saturating the system.
- * After a {@link ReplicationContext#maxConnectionAttemptsForPrimary() configurable} number of failed attempts, the replicator
+ * After a {@link MongoDbTaskContext#maxConnectionAttemptsForPrimary() configurable} number of failed attempts, the replicator
  * will fail by throwing a {@link ConnectException}.
  *
  * @author Randall Hauch
@@ -85,7 +85,10 @@ import io.debezium.util.Threads;
 public class Replicator {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final ReplicationContext context;
+
+    private static final String AUTHORIZATION_FAILURE_MESSAGE = "Command failed with error 13";
+
+    private final MongoDbTaskContext context;
     private final ExecutorService copyThreads;
     private final ReplicaSet replicaSet;
     private final String rsName;
@@ -93,17 +96,17 @@ public class Replicator {
     private final SourceInfo source;
     private final RecordMakers recordMakers;
     private final BufferableRecorder bufferedRecorder;
-    private final Predicate<CollectionId> collectionFilter;
-    private final Predicate<String> databaseFilter;
     private final Clock clock;
-    private ReplicationContext.MongoPrimary primaryClient;
+    private ConnectionContext.MongoPrimary primaryClient;
+    private final Consumer<Throwable> onFailure;
 
     /**
      * @param context the replication context; may not be null
      * @param replicaSet the replica set to be replicated; may not be null
      * @param recorder the recorder for source record produced by this replicator; may not be null
+     * @param onFailure listener of exceptions thrown by replicator task
      */
-    public Replicator(ReplicationContext context, ReplicaSet replicaSet, BlockingConsumer<SourceRecord> recorder) {
+    public Replicator(MongoDbTaskContext context, ReplicaSet replicaSet, BlockingConsumer<SourceRecord> recorder, Consumer<Throwable> onFailure) {
         assert context != null;
         assert replicaSet != null;
         assert recorder != null;
@@ -112,12 +115,11 @@ public class Replicator {
         this.replicaSet = replicaSet;
         this.rsName = replicaSet.replicaSetName();
         final String copyThreadName = "copy-" + (replicaSet.hasReplicaSetName() ? replicaSet.replicaSetName() : "main");
-        this.copyThreads = Threads.newFixedThreadPool(MongoDbConnector.class, context.serverName(), copyThreadName, context.maxNumberOfCopyThreads());
+        this.copyThreads = Threads.newFixedThreadPool(MongoDbConnector.class, context.serverName(), copyThreadName, context.getConnectionContext().maxNumberOfCopyThreads());
         this.bufferedRecorder = new BufferableRecorder(recorder);
-        this.recordMakers = new RecordMakers(this.source, context.topicSelector(), this.bufferedRecorder);
-        this.collectionFilter = this.context.collectionFilter();
-        this.databaseFilter = this.context.databaseFilter();
-        this.clock = this.context.clock();
+        this.recordMakers = new RecordMakers(this.source, context.topicSelector(), this.bufferedRecorder, context.isEmitTombstoneOnDelete());
+        this.clock = this.context.getClock();
+        this.onFailure = onFailure;
     }
 
     /**
@@ -127,6 +129,7 @@ public class Replicator {
      */
     public void stop() {
         this.copyThreads.shutdownNow();
+        this.running.set(false);
     }
 
     /**
@@ -144,7 +147,15 @@ public class Replicator {
                     }
                     readOplog();
                 }
-            } finally {
+            }
+            catch (Throwable t) {
+                logger.error("Replicator for replica set {} failed", rsName, t);
+                onFailure.accept(t);
+            }
+            finally {
+                if (primaryClient != null) {
+                    primaryClient.stop();
+                }
                 this.running.set(false);
             }
         }
@@ -157,9 +168,19 @@ public class Replicator {
      */
     protected boolean establishConnectionToPrimary() {
         logger.info("Connecting to '{}'", replicaSet);
-        primaryClient = context.primaryFor(replicaSet, (desc, error) -> {
-            logger.error("Error while attempting to {}: {}", desc, error.getMessage(), error);
-        });
+        primaryClient = context.getConnectionContext().primaryFor(
+                replicaSet,
+                context.filters(),
+                (desc, error) -> {
+                    // propagate authorization failures
+                    if (error.getMessage() != null && error.getMessage().startsWith(AUTHORIZATION_FAILURE_MESSAGE)) {
+                        throw new ConnectException("Error while attempting to " + desc, error);
+                    }
+                    else {
+                        logger.error("Error while attempting to {}: {}", desc, error.getMessage(), error);
+                    }
+                });
+
         return primaryClient != null;
     }
 
@@ -176,7 +197,7 @@ public class Replicator {
 
     /**
      * Determine if an initial sync should be performed. An initial sync is expected if the {@link #source} has no previously
-     * recorded offsets for this replica set, or if {@link ReplicationContext#performSnapshotEvenIfNotNeeded() a snapshot should
+     * recorded offsets for this replica set, or if {@link MongoDbTaskContext#performSnapshotEvenIfNotNeeded() a snapshot should
      * always be performed}.
      *
      * @return {@code true} if the initial sync should be performed, or {@code false} otherwise
@@ -186,7 +207,7 @@ public class Replicator {
         if (source.hasOffset(rsName)) {
             logger.info("Found existing offset for replica set '{}' at {}", rsName, source.lastOffset(rsName));
             performSnapshot = false;
-            if (context.performSnapshotEvenIfNotNeeded()) {
+            if (context.getConnectionContext().performSnapshotEvenIfNotNeeded()) {
                 logger.info("Configured to performing initial sync of replica set '{}'", rsName);
                 performSnapshot = true;
             } else {
@@ -197,13 +218,13 @@ public class Replicator {
                 } else {
                     // There is no ongoing initial sync, so look to see if our last recorded offset still exists in the oplog.
                     BsonTimestamp lastRecordedTs = source.lastOffsetTimestamp(rsName);
-                    AtomicReference<BsonTimestamp> firstExistingTs = new AtomicReference<>();
-                    primaryClient.execute("get oplog position", primary -> {
+
+                    BsonTimestamp firstAvailableTs = primaryClient.execute("get oplog position", primary -> {
                         MongoCollection<Document> oplog = primary.getDatabase("local").getCollection("oplog.rs");
                         Document firstEvent = oplog.find().sort(new Document("$natural", 1)).limit(1).first(); // may be null
-                        firstExistingTs.set(SourceInfo.extractEventTimestamp(firstEvent));
+                        return SourceInfo.extractEventTimestamp(firstEvent);
                     });
-                    BsonTimestamp firstAvailableTs = firstExistingTs.get();
+
                     if (firstAvailableTs == null) {
                         logger.info("The oplog contains no entries, so performing initial sync of replica set '{}'", rsName);
                         performSnapshot = true;
@@ -249,12 +270,9 @@ public class Replicator {
         final long syncStart = clock.currentTimeInMillis();
 
         // We need to copy each collection, so put the collection IDs into a queue ...
-        final List<CollectionId> collections = new ArrayList<>();
-        primaryClient.collections().forEach(id -> {
-            if (databaseFilter.test(id.dbName()) && collectionFilter.test(id))collections.add(id);
-        });
+        final List<CollectionId> collections = primaryClient.collections();
         final Queue<CollectionId> collectionsToCopy = new ConcurrentLinkedQueue<>(collections);
-        final int numThreads = Math.min(collections.size(), context.maxNumberOfCopyThreads());
+        final int numThreads = Math.min(collections.size(), context.getConnectionContext().maxNumberOfCopyThreads());
         final CountDownLatch latch = new CountDownLatch(numThreads);
         final AtomicBoolean aborted = new AtomicBoolean(false);
         final AtomicInteger replicatorThreadCounter = new AtomicInteger(0);
@@ -353,7 +371,7 @@ public class Replicator {
         MongoCollection<Document> docCollection = db.getCollection(collectionId.name());
         long counter = 0;
         try (MongoCursor<Document> cursor = docCollection.find().iterator()) {
-            while (cursor.hasNext()) {
+            while (running.get() && cursor.hasNext()) {
                 Document doc = cursor.next();
                 logger.trace("Found existing doc in {}: {}", collectionId, doc);
                 counter += factory.recordObject(collectionId, doc, timestamp);
@@ -369,7 +387,7 @@ public class Replicator {
      * is elected (as identified by an oplog event), of if the current thread doing the reading is interrupted.
      */
     protected void readOplog() {
-        primaryClient.execute("read from oplog on '" + replicaSet + "'", this::readOplog);
+        primaryClient.execute("read from oplog on '" + replicaSet + "'", (Consumer<MongoClient>)this::readOplog);
     }
 
     /**
@@ -388,7 +406,6 @@ public class Replicator {
         FindIterable<Document> results = oplog.find(filter)
                                               .sort(new Document("$natural", 1)) // force forwards collection scan
                                               .oplogReplay(true) // tells Mongo to not rely on indexes
-                                              .noCursorTimeout(true) // don't timeout waiting for events
                                               .cursorType(CursorType.TailableAwait); // tail and await new data
         // Read as much of the oplog as we can ...
         ServerAddress primaryAddress = primary.getAddress();
@@ -410,7 +427,6 @@ public class Replicator {
      * @return {@code true} if additional events should be processed, or {@code false} if the caller should stop
      *         processing events
      */
-
     protected boolean handleOplogEvent(ServerAddress primaryAddress, Document event) {
         logger.debug("Found event: {}", event);
         String ns = event.getString("ns");
@@ -466,12 +482,12 @@ public class Replicator {
                 return true;
             }
             // Otherwise, it is an event on a document in a collection ...
-            if (!databaseFilter.test(dbName)){
+            if (!context.filters().databaseFilter().test(dbName)){
                 logger.debug("Skipping the event for database {} based on database.whitelist");
                 return true;
             }
             CollectionId collectionId = new CollectionId(rsName, dbName, collectionName);
-            if (collectionFilter.test(collectionId)) {
+            if (context.filters().collectionFilter().test(collectionId)) {
                 RecordsForCollection factory = recordMakers.forCollection(collectionId);
                 try {
                     recordEvent(event, dbName, collectionName, factory);

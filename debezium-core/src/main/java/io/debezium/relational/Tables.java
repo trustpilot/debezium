@@ -7,6 +7,8 @@ package io.debezium.relational;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -106,6 +108,13 @@ public final class Tables {
         this.tablesByTableId.putAll(other.tablesByTableId);
     }
 
+    public void clear() {
+        lock.write(() -> {
+            tablesByTableId.clear();
+            changes.clear();
+        });
+    }
+
     @Override
     public Tables clone() {
         return new Tables(this, tableIdCaseInsensitive);
@@ -165,6 +174,23 @@ public final class Tables {
             } finally {
                 changes.add(updated.id());
             }
+        });
+    }
+
+    public void removeTablesForDatabase(String schemaName) {
+        removeTablesForDatabase(schemaName, null);
+    }
+
+    public void removeTablesForDatabase(String catalogName, String schemaName) {
+        lock.write(() -> {
+            tablesByTableId.entrySet().removeIf(tableIdTableEntry -> {
+                TableId tableId = tableIdTableEntry.getKey();
+
+                boolean equalCatalog = Objects.equals(catalogName, tableId.catalog());
+                boolean equalSchema = Objects.equals(schemaName, tableId.schema());
+
+                return equalSchema && equalCatalog;
+            });
         });
     }
 
@@ -379,6 +405,14 @@ public final class Tables {
 
         void forEach(BiConsumer<? super TableId, ? super TableImpl> action) {
             values.forEach(action);
+        }
+
+        Set<Map.Entry<TableId, TableImpl>> entrySet() {
+            return values.entrySet();
+        }
+
+        void clear() {
+            values.clear();
         }
 
         private TableId toLowerCaseIfNeeded(TableId tableId) {

@@ -6,22 +6,25 @@
 package io.debezium.relational;
 
 import java.sql.Types;
+import java.util.Optional;
 
 final class ColumnEditorImpl implements ColumnEditor {
 
     private String name;
     private int jdbcType = Types.INTEGER;
-    private int componentType = Column.UNSET_INT_VALUE;
+    private int nativeType = Column.UNSET_INT_VALUE;
     private String typeName;
     private String typeExpression;
     private String charsetName;
     private String tableCharsetName;
     private int length = Column.UNSET_INT_VALUE;
-    private int scale = Column.UNSET_INT_VALUE;
+    private Integer scale;
     private int position = 1;
     private boolean optional = true;
     private boolean autoIncremented = false;
     private boolean generated = false;
+    private Object defaultValue = null;
+    private boolean hasDefaultValue = false;
 
     protected ColumnEditorImpl() {
     }
@@ -47,8 +50,8 @@ final class ColumnEditorImpl implements ColumnEditor {
     }
 
     @Override
-    public int componentType() {
-        return componentType;
+    public int nativeType() {
+        return nativeType;
     }
 
     @Override
@@ -67,8 +70,8 @@ final class ColumnEditorImpl implements ColumnEditor {
     }
 
     @Override
-    public int scale() {
-        return scale;
+    public Optional<Integer> scale() {
+        return Optional.ofNullable(scale);
     }
 
     @Override
@@ -89,6 +92,16 @@ final class ColumnEditorImpl implements ColumnEditor {
     @Override
     public boolean isGenerated() {
         return generated;
+    }
+
+    @Override
+    public Object defaultValue() {
+        return defaultValue;
+    }
+
+    @Override
+    public boolean hasDefaultValue() {
+        return hasDefaultValue;
     }
 
     @Override
@@ -118,9 +131,8 @@ final class ColumnEditorImpl implements ColumnEditor {
     }
 
     @Override
-    public ColumnEditorImpl componentType(int componentType) {
-        assert jdbcType == Types.ARRAY;
-        this.componentType = componentType;
+    public ColumnEditorImpl nativeType(int nativeType) {
+        this.nativeType = nativeType;
         return this;
     }
 
@@ -144,8 +156,7 @@ final class ColumnEditorImpl implements ColumnEditor {
     }
 
     @Override
-    public ColumnEditorImpl scale(int scale) {
-        assert scale >= -1;
+    public ColumnEditorImpl scale(Integer scale) {
         this.scale = scale;
         return this;
     }
@@ -153,6 +164,10 @@ final class ColumnEditorImpl implements ColumnEditor {
     @Override
     public ColumnEditorImpl optional(boolean optional) {
         this.optional = optional;
+        if (optional && !hasDefaultValue()) {
+            // Optional columns have implicit NULL default value
+            defaultValue(null);
+        }
         return this;
     }
 
@@ -175,14 +190,23 @@ final class ColumnEditorImpl implements ColumnEditor {
     }
 
     @Override
-    public Column create() {
-        return new ColumnImpl(name, position, jdbcType, componentType, typeName, typeExpression, charsetName, tableCharsetName, length, scale, optional,
-                              autoIncremented, generated);
+    public ColumnEditor defaultValue(final Object defaultValue) {
+        this.hasDefaultValue = true;
+        this.defaultValue = defaultValue;
+        return this;
     }
 
     @Override
-    public int compareTo(Column that) {
-        return create().compareTo(that);
+    public ColumnEditor unsetDefaultValue() {
+        this.hasDefaultValue = false;
+        this.defaultValue = null;
+        return this;
+    }
+
+    @Override
+    public Column create() {
+        return new ColumnImpl(name, position, jdbcType, nativeType, typeName, typeExpression, charsetName, tableCharsetName, length, scale, optional,
+                              autoIncremented, generated, defaultValue, hasDefaultValue);
     }
 
     @Override

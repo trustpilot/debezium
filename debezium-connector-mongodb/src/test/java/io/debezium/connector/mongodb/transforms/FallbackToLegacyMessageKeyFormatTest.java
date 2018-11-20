@@ -1,9 +1,11 @@
 package io.debezium.connector.mongodb.transforms;
 
 import io.debezium.connector.mongodb.CollectionId;
+import io.debezium.connector.mongodb.MongoDbTopicSelector;
 import io.debezium.connector.mongodb.RecordMakers;
 import io.debezium.connector.mongodb.SourceInfo;
-import io.debezium.connector.mongodb.TopicSelector;
+import io.debezium.relational.TableId;
+import io.debezium.schema.TopicSelector;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.bson.BsonTimestamp;
@@ -28,10 +30,11 @@ import static org.fest.assertions.Assertions.assertThat;
 public class FallbackToLegacyMessageKeyFormatTest {
     private static final String SERVER_NAME = "serverX.";
     private static final String PREFIX = SERVER_NAME + ".";
+    private static final String HEARTBEAT_PREFIX = "BeatMyHeart";
 
     private SourceInfo source;
     private RecordMakers recordMakers;
-    private TopicSelector topicSelector;
+    private TopicSelector<CollectionId> topicSelector;
     private List<SourceRecord> produced;
 
     private FallbackToLegacyMessageKeyFormat<SourceRecord> transformation;
@@ -39,9 +42,9 @@ public class FallbackToLegacyMessageKeyFormatTest {
     @Before
     public void setup() {
         source = new SourceInfo(SERVER_NAME);
-        topicSelector = TopicSelector.defaultSelector(PREFIX);
+        topicSelector = MongoDbTopicSelector.defaultSelector(SERVER_NAME, "__debezium-heartbeat");
         produced = new ArrayList<>();
-        recordMakers = new RecordMakers(source, topicSelector, produced::add);
+        recordMakers = new RecordMakers(source, topicSelector, produced::add, true);
         transformation = new FallbackToLegacyMessageKeyFormat();
     }
 

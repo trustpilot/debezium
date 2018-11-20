@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 
 import com.mongodb.MongoClient;
 import com.mongodb.MongoException;
+import com.mongodb.MongoInterruptedException;
 import com.mongodb.ReplicaSetStatus;
 
 import io.debezium.annotation.ThreadSafe;
@@ -37,7 +38,7 @@ public class ReplicaSetDiscovery {
     public static final String ADMIN_DATABASE_NAME = "admin";
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final ReplicationContext context;
+    private final MongoDbTaskContext context;
     private final String seedAddresses;
 
     /**
@@ -45,9 +46,9 @@ public class ReplicaSetDiscovery {
      *
      * @param context the replication context; may not be null
      */
-    public ReplicaSetDiscovery(ReplicationContext context) {
+    public ReplicaSetDiscovery(MongoDbTaskContext context) {
         this.context = context;
-        this.seedAddresses = context.hosts();
+        this.seedAddresses = context.getConnectionContext().hosts();
     }
 
     /**
@@ -57,7 +58,7 @@ public class ReplicaSetDiscovery {
      * @return the information about the replica sets; never null but possibly empty
      */
     public ReplicaSets getReplicaSets() {
-        MongoClient client = context.clientFor(seedAddresses);
+        MongoClient client = context.getConnectionContext().clientFor(seedAddresses);
         Set<ReplicaSet> replicaSetSpecs = new HashSet<>();
 
         // First see if the addresses are for a config server replica set ...
@@ -70,6 +71,11 @@ public class ReplicaSetDiscovery {
                 String replicaSetName = MongoUtil.replicaSetUsedIn(hostStr);
                 replicaSetSpecs.add(new ReplicaSet(hostStr, replicaSetName, shardName));
             });
+        }
+        catch (MongoInterruptedException e) {
+            logger.error("Interrupted while reading the '{}' collection in the '{}' database: {}",
+                         shardsCollection, CONFIG_DATABASE_NAME, e.getMessage(), e);
+            Thread.currentThread().interrupt();
         } catch (MongoException e) {
             logger.error("Error while reading the '{}' collection in the '{}' database: {}",
                          shardsCollection, CONFIG_DATABASE_NAME, e.getMessage(), e);

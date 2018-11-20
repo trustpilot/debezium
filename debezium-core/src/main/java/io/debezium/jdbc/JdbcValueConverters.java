@@ -23,7 +23,6 @@ import java.time.temporal.TemporalAdjuster;
 import java.util.BitSet;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.slf4j.Logger;
@@ -31,6 +30,7 @@ import org.slf4j.LoggerFactory;
 
 import io.debezium.annotation.Immutable;
 import io.debezium.data.Bits;
+import io.debezium.data.SpecialValueDecimal;
 import io.debezium.data.Xml;
 import io.debezium.relational.Column;
 import io.debezium.relational.ValueConverter;
@@ -63,7 +63,7 @@ import io.debezium.util.NumberConversions;
 public class JdbcValueConverters implements ValueConverterProvider {
 
     public enum DecimalMode {
-        PRECISE, DOUBLE;
+        PRECISE, DOUBLE, STRING;
     }
 
     public enum BigIntUnsignedMode {
@@ -162,14 +162,7 @@ public class JdbcValueConverters implements ValueConverterProvider {
                 return SchemaBuilder.float64();
             case Types.NUMERIC:
             case Types.DECIMAL:
-                switch (decimalMode) {
-                    case DOUBLE:
-                        return SchemaBuilder.float64();
-                    case PRECISE:
-                        // values are fixed-precision decimal values with exact precision.
-                        // Use Kafka Connect's arbitrary precision decimal type and use the column's specified scale ...
-                        return Decimal.builder(column.scale());
-                }
+                return SpecialValueDecimal.builder(decimalMode, column.length(), column.scale().get());
 
                 // Fixed-length string values
             case Types.CHAR:
@@ -198,15 +191,15 @@ public class JdbcValueConverters implements ValueConverterProvider {
                     return MicroTime.builder();
                 }
                 if (adaptiveTimePrecisionMode) {
-                    if (column.length() <= 3) return Time.builder();
-                    if (column.length() <= 6) return MicroTime.builder();
+                    if (getTimePrecision(column) <= 3) return Time.builder();
+                    if (getTimePrecision(column) <= 6) return MicroTime.builder();
                     return NanoTime.builder();
                 }
                 return org.apache.kafka.connect.data.Time.builder();
             case Types.TIMESTAMP:
                 if (adaptiveTimePrecisionMode || adaptiveTimeMicrosecondsPrecisionMode) {
-                    if (column.length() <= 3) return Timestamp.builder();
-                    if (column.length() <= 6) return MicroTimestamp.builder();
+                    if (getTimePrecision(column) <= 3) return Timestamp.builder();
+                    if (getTimePrecision(column) <= 6) return MicroTimestamp.builder();
                     return NanoTimestamp.builder();
                 }
                 return org.apache.kafka.connect.data.Timestamp.builder();
@@ -270,19 +263,9 @@ public class JdbcValueConverters implements ValueConverterProvider {
             case Types.REAL:
                 return (data) -> convertReal(column, fieldDefn, data);
             case Types.NUMERIC:
-                switch (decimalMode) {
-                    case DOUBLE:
-                        return (data) -> convertDouble(column, fieldDefn, data);
-                    case PRECISE:
-                        return (data) -> convertNumeric(column, fieldDefn, data);
-                }
+                return (data) -> convertNumeric(column, fieldDefn, data);
             case Types.DECIMAL:
-                switch (decimalMode) {
-                    case DOUBLE:
-                        return (data) -> convertDouble(column, fieldDefn, data);
-                    case PRECISE:
-                        return (data) -> convertDecimal(column, fieldDefn, data);
-                }
+                return (data) -> convertDecimal(column, fieldDefn, data);
 
                 // String values
             case Types.CHAR: // variable-length
@@ -308,15 +291,15 @@ public class JdbcValueConverters implements ValueConverterProvider {
                     return data -> convertTimeToMicrosPastMidnight(column, fieldDefn, data);
                 }
                 if (adaptiveTimePrecisionMode) {
-                    if (column.length() <= 3) return data -> convertTimeToMillisPastMidnight(column, fieldDefn, data);
-                    if (column.length() <= 6) return data -> convertTimeToMicrosPastMidnight(column, fieldDefn, data);
+                    if (getTimePrecision(column) <= 3) return data -> convertTimeToMillisPastMidnight(column, fieldDefn, data);
+                    if (getTimePrecision(column) <= 6) return data -> convertTimeToMicrosPastMidnight(column, fieldDefn, data);
                     return (data) -> convertTimeToNanosPastMidnight(column, fieldDefn, data);
                 }
                 return (data) -> convertTimeToMillisPastMidnightAsDate(column, fieldDefn, data);
             case Types.TIMESTAMP:
                 if (adaptiveTimePrecisionMode || adaptiveTimeMicrosecondsPrecisionMode) {
-                    if (column.length() <= 3) return data -> convertTimestampToEpochMillis(column, fieldDefn, data);
-                    if (column.length() <= 6) return data -> convertTimestampToEpochMicros(column, fieldDefn, data);
+                    if (getTimePrecision(column) <= 3) return data -> convertTimestampToEpochMillis(column, fieldDefn, data);
+                    if (getTimePrecision(column) <= 6) return data -> convertTimestampToEpochMicros(column, fieldDefn, data);
                     return (data) -> convertTimestampToEpochNanos(column, fieldDefn, data);
                 }
                 return (data) -> convertTimestampToEpochMillisAsDate(column, fieldDefn, data);
@@ -810,6 +793,9 @@ public class JdbcValueConverters implements ValueConverterProvider {
         if (data instanceof Boolean) {
             return NumberConversions.getShort((Boolean) data);
         }
+        if (data instanceof String) {
+            return Short.parseShort((String) data);
+        }
         return handleUnknownData(column, fieldDefn, data);
     }
 
@@ -838,6 +824,9 @@ public class JdbcValueConverters implements ValueConverterProvider {
         if (data instanceof Boolean) {
             return NumberConversions.getInteger((Boolean) data);
         }
+        if (data instanceof String) {
+            return Integer.parseInt((String) data);
+        }
         return handleUnknownData(column, fieldDefn, data);
     }
 
@@ -865,6 +854,9 @@ public class JdbcValueConverters implements ValueConverterProvider {
         }
         if (data instanceof Boolean) {
             return NumberConversions.getLong((Boolean) data);
+        }
+        if (data instanceof String) {
+            return Long.parseLong((String) data);
         }
         return handleUnknownData(column, fieldDefn, data);
     }
@@ -904,6 +896,9 @@ public class JdbcValueConverters implements ValueConverterProvider {
             // Includes BigDecimal and other numeric values ...
             Number value = (Number) data;
             return Double.valueOf(value.doubleValue());
+        }
+        if (data instanceof SpecialValueDecimal) {
+            return ((SpecialValueDecimal)data).toDouble();
         }
         if (data instanceof Boolean) {
             return NumberConversions.getDouble((Boolean) data);
@@ -950,36 +945,7 @@ public class JdbcValueConverters implements ValueConverterProvider {
      * @throws IllegalArgumentException if the value could not be converted but the column does not allow nulls
      */
     protected Object convertNumeric(Column column, Field fieldDefn, Object data) {
-        if (data == null) {
-            data = fieldDefn.schema().defaultValue();
-        }
-        if (data == null) {
-            if (column.isOptional()) {
-                return null;
-            }
-            else {
-                return BigDecimal.ZERO;
-            }
-        }
-        BigDecimal decimal = null;
-        if (data instanceof BigDecimal)
-            decimal = (BigDecimal) data;
-        else if (data instanceof Boolean)
-            decimal = NumberConversions.getBigDecimal((Boolean) data);
-        else if (data instanceof Short)
-            decimal = new BigDecimal(((Short) data).intValue());
-        else if (data instanceof Integer)
-            decimal = new BigDecimal(((Integer) data).intValue());
-        else if (data instanceof Long)
-            decimal = BigDecimal.valueOf(((Long) data).longValue());
-        else if (data instanceof Float)
-            decimal = BigDecimal.valueOf(((Float) data).doubleValue());
-        else if (data instanceof Double)
-            decimal = BigDecimal.valueOf(((Double) data).doubleValue());
-        else {
-            return handleUnknownData(column, fieldDefn, data);
-        }
-        return decimal;
+        return convertDecimal(column, fieldDefn, data);
     }
 
     /**
@@ -992,6 +958,17 @@ public class JdbcValueConverters implements ValueConverterProvider {
      * @throws IllegalArgumentException if the value could not be converted but the column does not allow nulls
      */
     protected Object convertDecimal(Column column, Field fieldDefn, Object data) {
+        if (data instanceof SpecialValueDecimal) {
+            return SpecialValueDecimal.fromLogical((SpecialValueDecimal)data, decimalMode, column.name());
+        }
+        Object decimal = toBigDecimal(column, fieldDefn, data);
+        if (decimal instanceof BigDecimal) {
+            return SpecialValueDecimal.fromLogical(new SpecialValueDecimal((BigDecimal)decimal), decimalMode, column.name());
+        }
+        return decimal;
+    }
+
+    protected Object toBigDecimal(Column column, Field fieldDefn, Object data) {
         if (data == null) {
             data = fieldDefn.schema().defaultValue();
         }
@@ -1018,6 +995,8 @@ public class JdbcValueConverters implements ValueConverterProvider {
             decimal = BigDecimal.valueOf(((Float) data).doubleValue());
         else if (data instanceof Double)
             decimal = BigDecimal.valueOf(((Double) data).doubleValue());
+        else if (data instanceof String)
+            decimal = new BigDecimal((String) data);
         else {
             return handleUnknownData(column, fieldDefn, data);
         }
@@ -1244,5 +1223,9 @@ public class JdbcValueConverters implements ValueConverterProvider {
         }
         throw new IllegalArgumentException("Unexpected value for JDBC type " + column.jdbcType() + " and column " + column +
                 ": class=" + data.getClass()); // don't include value in case its sensitive
+    }
+
+    protected int getTimePrecision(Column column) {
+        return column.length();
     }
 }

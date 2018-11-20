@@ -6,14 +6,17 @@
 package io.debezium.connector.mysql;
 
 import static org.fest.assertions.Assertions.assertThat;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.fail;
 
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
@@ -74,7 +77,11 @@ public class SnapshotReaderIT {
 
     protected Configuration.Builder simpleConfig() {
         return DATABASE.defaultConfig()
-                .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, false);
+                .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, false)
+                .with(MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE, MySqlConnectorConfig.SnapshotLockingMode.MINIMAL)
+                // Explicitly enable INCLUDE_SQL_QUERY connector option. For snapshots it should have no effect as
+                // source query should not included in snapshot events.
+                .with(MySqlConnectorConfig.INCLUDE_SQL_QUERY, true);
     }
 
     @Test
@@ -86,7 +93,6 @@ public class SnapshotReaderIT {
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
         reader.generateInsertEvents();
-        reader.useMinimalBlocking(true);
 
         // Start the snapshot ...
         reader.start();
@@ -99,6 +105,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
@@ -183,7 +190,6 @@ public class SnapshotReaderIT {
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
         reader.generateReadEvents();
-        reader.useMinimalBlocking(true);
 
         // Start the snapshot ...
         reader.start();
@@ -196,6 +202,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
                 System.out.println(record);
@@ -287,7 +294,6 @@ public class SnapshotReaderIT {
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
         reader.generateInsertEvents();
-        reader.useMinimalBlocking(true);
 
         // Start the snapshot ...
         reader.start();
@@ -300,6 +306,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
@@ -386,7 +393,6 @@ public class SnapshotReaderIT {
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
         reader.generateInsertEvents();
-        reader.useMinimalBlocking(true);
 
         // Start the snapshot ...
         reader.start();
@@ -399,6 +405,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
@@ -416,7 +423,6 @@ public class SnapshotReaderIT {
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
         reader.generateInsertEvents();
-        reader.useMinimalBlocking(true);
 
         // Start the snapshot ...
         reader.start();
@@ -429,6 +435,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
@@ -450,6 +457,66 @@ public class SnapshotReaderIT {
             fail("failed to complete the snapshot within 10 seconds");
         }
     }
+
+    @Test
+    public void shouldSnapshotTablesInOrderSpecifiedInTablesWhitelist() throws Exception{
+        config = simpleConfig()
+                .with(MySqlConnectorConfig.TABLE_WHITELIST, "connector_test_ro_(.*).orders,connector_test_ro_(.*).Products,connector_test_ro_(.*).products_on_hand,connector_test_ro_(.*).dbz_342_timetest")
+                .build();
+        context = new MySqlTaskContext(config);
+        context.start();
+        reader = new SnapshotReader("snapshot", context);
+        reader.uponCompletion(completed::countDown);
+        reader.generateInsertEvents();
+        // Start the snapshot ...
+        reader.start();
+        // Poll for records ...
+        List<SourceRecord> records;
+        LinkedHashSet<String> tablesInOrder = new LinkedHashSet<>();
+        LinkedHashSet<String> tablesInOrderExpected = getTableNamesInSpecifiedOrder("orders", "Products", "products_on_hand", "dbz_342_timetest");
+        while ((records = reader.poll()) != null) {
+            records.forEach(record -> {
+                VerifyRecord.isValid(record);
+                if (record.value() != null)
+                    tablesInOrder.add(getTableNameFromSourceRecord.apply(record));
+            });
+        }
+        assertArrayEquals(tablesInOrder.toArray(), tablesInOrderExpected.toArray());
+    }
+    @Test
+    public void shouldSnapshotTablesInLexicographicalOrder() throws Exception{
+        config = simpleConfig()
+                .build();
+        context = new MySqlTaskContext(config);
+        context.start();
+        reader = new SnapshotReader("snapshot", context);
+        reader.uponCompletion(completed::countDown);
+        reader.generateInsertEvents();
+        // Start the snapshot ...
+        reader.start();
+        // Poll for records ...
+        //        Testing.Print.enable();
+        List<SourceRecord> records;
+        LinkedHashSet<String> tablesInOrder = new LinkedHashSet<>();
+        LinkedHashSet<String> tablesInOrderExpected = getTableNamesInSpecifiedOrder("Products", "customers", "dbz_342_timetest", "orders", "products_on_hand");
+        while ((records = reader.poll()) != null) {
+            records.forEach(record -> {
+                VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
+                if (record.value() != null)
+                    tablesInOrder.add(getTableNameFromSourceRecord.apply(record));
+            });
+        }
+        assertArrayEquals(tablesInOrder.toArray(), tablesInOrderExpected.toArray());
+    }
+
+    private Function<SourceRecord, String> getTableNameFromSourceRecord = sourceRecord -> ((Struct) sourceRecord.value()).getStruct("source").getString("table");
+    private LinkedHashSet<String> getTableNamesInSpecifiedOrder(String ... tables){
+        LinkedHashSet<String> tablesInOrderExpected = new LinkedHashSet<>();
+        for (String table : tables)
+            tablesInOrderExpected.add(table);
+        return tablesInOrderExpected;
+    }
     
     public void shouldCreateSnapshotSchemaOnly() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.SCHEMA_ONLY).build();
@@ -458,7 +525,6 @@ public class SnapshotReaderIT {
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
         reader.generateInsertEvents();
-        reader.useMinimalBlocking(true);
 
         // Start the snapshot ...
         reader.start();
@@ -471,6 +537,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });

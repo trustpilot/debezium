@@ -29,7 +29,7 @@ public class DecoderDifferences {
 
     /**
      * wal2json plugin is not currently able to encode and parse quoted identifiers
-     * 
+     *
      * @author Jiri Pechanec
      *
      */
@@ -41,7 +41,19 @@ public class DecoderDifferences {
     }
 
     private static boolean wal2Json() {
-        return TestHelper.decoderPlugin() == PostgresConnectorConfig.LogicalDecoder.WAL2JSON || TestHelper.decoderPlugin() == PostgresConnectorConfig.LogicalDecoder.WAL2JSON_RDS;
+        return TestHelper.decoderPlugin() == PostgresConnectorConfig.LogicalDecoder.WAL2JSON
+                || TestHelper.decoderPlugin() == PostgresConnectorConfig.LogicalDecoder.WAL2JSON_RDS
+                || TestHelper.decoderPlugin() == PostgresConnectorConfig.LogicalDecoder.WAL2JSON_STREAMING
+                || TestHelper.decoderPlugin() == PostgresConnectorConfig.LogicalDecoder.WAL2JSON_RDS_STREAMING;
     }
 
+    /**
+     * wal2json plugin is not currently able to encode and parse NaN and Inf values
+     * 
+     * @author Jiri Pechanec
+     *
+     */
+    public static boolean areSpecialFPValuesUnsupported() {
+        return wal2Json();
+    }
 }

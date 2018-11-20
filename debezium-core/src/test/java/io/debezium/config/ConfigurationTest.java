@@ -50,6 +50,12 @@ public class ConfigurationTest {
     }
 
     @Test
+    public void shoulCreateInternalFields() {
+        config = Configuration.create().with(Field.createInternal("a"), "a1").build();
+        assertThat(config.getString("internal.a")).isEqualTo("a1");
+    }
+
+    @Test
     public void shouldCallFunctionOnEachMatchingFieldUsingRegex() {
         config = Configuration.create()
                 .with("column.truncate.to.-10.chars", "should-not-be-matched")
@@ -128,5 +134,13 @@ public class ConfigurationTest {
         String defaultDdlFilter = Configuration.create().build().getString(DatabaseHistory.DDL_FILTER);
         Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter);
         assertThat(ddlFilter.test("INSERT INTO mysql.rds_heartbeat2(id, value) values (1,1510678117058) ON DUPLICATE KEY UPDATE value = 1510678117058")).isTrue();
+    }
+
+    @Test
+    @FixFor("DBZ-661")
+    public void defaultDddlFilterShouldFilterOutFlushRelayLogs() {
+        String defaultDdlFilter = Configuration.create().build().getString(DatabaseHistory.DDL_FILTER);
+        Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter);
+        assertThat(ddlFilter.test("FLUSH RELAY LOGS")).isTrue();
     }
 }

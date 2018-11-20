@@ -6,10 +6,11 @@
 package io.debezium.connector.mongodb.transforms;
 
 import io.debezium.connector.mongodb.CollectionId;
+import io.debezium.connector.mongodb.MongoDbTopicSelector;
 import io.debezium.connector.mongodb.RecordMakers;
 import io.debezium.connector.mongodb.RecordMakers.RecordsForCollection;
 import io.debezium.connector.mongodb.SourceInfo;
-import io.debezium.connector.mongodb.TopicSelector;
+import io.debezium.schema.TopicSelector;
 import org.apache.kafka.common.protocol.types.Field;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
@@ -40,7 +41,7 @@ public class FilterFieldsFromMongoDbEnvelopeTest {
 
     private SourceInfo source;
     private RecordMakers recordMakers;
-    private TopicSelector topicSelector;
+    private TopicSelector<CollectionId> topicSelector;
     private List<SourceRecord> produced;
 
     private FilterFieldsFromMongoDbEnvelope<SourceRecord> transformation;
@@ -48,9 +49,9 @@ public class FilterFieldsFromMongoDbEnvelopeTest {
     @Before
     public void setup() {
         source = new SourceInfo(SERVER_NAME);
-        topicSelector = TopicSelector.defaultSelector(PREFIX);
+        topicSelector = MongoDbTopicSelector.defaultSelector(SERVER_NAME, "__debezium-heartbeat");
         produced = new ArrayList<>();
-        recordMakers = new RecordMakers(source, topicSelector, produced::add);
+        recordMakers = new RecordMakers(source, topicSelector, produced::add, true);
         transformation = new FilterFieldsFromMongoDbEnvelope();
     }
 

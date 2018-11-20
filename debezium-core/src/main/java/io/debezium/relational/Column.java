@@ -6,6 +6,7 @@
 package io.debezium.relational;
 
 import java.sql.Types;
+import java.util.Optional;
 
 import io.debezium.annotation.Immutable;
 
@@ -51,13 +52,11 @@ public interface Column extends Comparable<Column> {
     int jdbcType();
 
     /**
-     * Get the component type for this column where jdbcType() is ARRAY. This is database specific and can be any integer
-     * value that relays additional information about the column-type since some jdbcTypes return generic type information
-     * (such as Types.ARRAY) that is not enough to understand the underlying column type.
+     * Get the database native type for this column
      *
      * @return a type constant for the specific database
      */
-    int componentType();
+    int nativeType();
 
     /**
      * Get the database-specific name of the column's data type.
@@ -92,9 +91,9 @@ public interface Column extends Comparable<Column> {
     /**
      * Get the scale of the column.
      *
-     * @return the scale, or -1 if the scale does not apply to this type
+     * @return the scale if it applies to this type
      */
-    int scale();
+    Optional<Integer> scale();
 
     /**
      * Determine whether this column is optional.
@@ -127,6 +126,20 @@ public interface Column extends Comparable<Column> {
      * @return {@code true} if the values are generated, or {@code false} otherwise
      */
     boolean isGenerated();
+
+    /**
+     * Get the default value of the column
+     *
+     * @return the default value
+     */
+    Object defaultValue();
+
+    /**
+     * Determine whether this column's has a default value
+     *
+     * @return {@code true} if the default value was provided, or {@code false} otherwise
+     */
+    boolean hasDefaultValue();
 
     @Override
     default int compareTo(Column that) {

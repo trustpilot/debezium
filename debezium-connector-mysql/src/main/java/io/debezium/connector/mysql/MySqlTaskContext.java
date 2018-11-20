@@ -5,19 +5,25 @@
  */
 package io.debezium.connector.mysql;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.function.Predicate;
 
 import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
+import io.debezium.connector.common.CdcSourceTaskContext;
 import io.debezium.connector.mysql.MySqlConnectorConfig.SnapshotMode;
 import io.debezium.function.Predicates;
+import io.debezium.relational.TableId;
 import io.debezium.relational.history.DatabaseHistory;
-import io.debezium.util.Clock;
+import io.debezium.schema.TopicSelector;
 import io.debezium.util.LoggingContext;
-import io.debezium.util.LoggingContext.PreviousContext;
 import io.debezium.util.Strings;
 
 /**
@@ -26,18 +32,22 @@ import io.debezium.util.Strings;
  * @see MySqlConnector
  * @author Randall Hauch
  */
-public final class MySqlTaskContext extends MySqlJdbcContext {
+public final class MySqlTaskContext extends CdcSourceTaskContext {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(MySqlTaskContext.class);
+
+    private final MySqlJdbcContext connectionContext;
+    private final Configuration config;
+    private final MySqlConnectorConfig connectorConfig;
     private final SourceInfo source;
     private final MySqlSchema dbSchema;
-    private final TopicSelector topicSelector;
+    private final TopicSelector<TableId> topicSelector;
     private final RecordMakers recordProcessor;
     private final Predicate<String> gtidSourceFilter;
     private final Predicate<String> ddlFilter;
-    private final Clock clock = Clock.system();
 
     /**
-     * Whether table ids are compared ingnoring letter casing.
+     * Whether table ids are compared ignoring letter casing.
      */
     private final boolean tableIdCaseInsensitive;
 
@@ -46,14 +56,18 @@ public final class MySqlTaskContext extends MySqlJdbcContext {
     }
 
     public MySqlTaskContext(Configuration config, Boolean tableIdCaseInsensitive) {
-        super(config);
+        super("MySQL", config.getString(MySqlConnectorConfig.SERVER_NAME));
+
+        this.config = config;
+        this.connectorConfig = new MySqlConnectorConfig(config);
+        this.connectionContext = new MySqlJdbcContext(config);
 
         // Set up the topic selector ...
-        this.topicSelector = TopicSelector.defaultSelector(serverName());
+        this.topicSelector = MySqlTopicSelector.defaultSelector(connectorConfig.getLogicalName(), connectorConfig.getHeartbeatTopicsPrefix());
 
         // Set up the source information ...
         this.source = new SourceInfo();
-        this.source.setServerName(serverName());
+        this.source.setServerName(connectorConfig.getLogicalName());
 
         // Set up the GTID filter ...
         String gtidSetIncludes = config.getString(MySqlConnectorConfig.GTID_SOURCE_INCLUDES);
@@ -62,27 +76,39 @@ public final class MySqlTaskContext extends MySqlJdbcContext {
                 : (gtidSetExcludes != null ? Predicates.excludesUuids(gtidSetExcludes) : null);
 
         if (tableIdCaseInsensitive == null) {
-            this.tableIdCaseInsensitive = !"0".equals(readMySqlSystemVariables(null).get(MySqlSystemVariables.LOWER_CASE_TABLE_NAMES));
+            this.tableIdCaseInsensitive = !"0".equals(connectionContext.readMySqlSystemVariables(null).get(MySqlSystemVariables.LOWER_CASE_TABLE_NAMES));
         } else {
             this.tableIdCaseInsensitive = tableIdCaseInsensitive;
         }
 
         // Set up the MySQL schema ...
-        this.dbSchema = new MySqlSchema(config, serverName(), this.gtidSourceFilter, this.tableIdCaseInsensitive);
+        this.dbSchema = new MySqlSchema(connectorConfig, this.gtidSourceFilter, this.tableIdCaseInsensitive, topicSelector);
 
         // Set up the record processor ...
-        this.recordProcessor = new RecordMakers(dbSchema, source, topicSelector);
+        this.recordProcessor = new RecordMakers(dbSchema, source, topicSelector, config.getBoolean(CommonConnectorConfig.TOMBSTONES_ON_DELETE));
 
         // Set up the DDL filter
         final String ddlFilter = config.getString(DatabaseHistory.DDL_FILTER);
         this.ddlFilter = (ddlFilter != null) ? Predicates.includes(ddlFilter) : (x -> false);
     }
 
+    public Configuration config() {
+        return config;
+    }
+
+    public MySqlConnectorConfig getConnectorConfig() {
+        return this.connectorConfig;
+    }
+
+    public MySqlJdbcContext getConnectionContext() {
+        return connectionContext;
+    }
+
     public String connectorName() {
         return config.getString("name");
     }
 
-    public TopicSelector topicSelector() {
+    public TopicSelector<TableId> topicSelector() {
         return topicSelector;
     }
 
@@ -114,8 +140,8 @@ public final class MySqlTaskContext extends MySqlJdbcContext {
      */
     public void initializeHistory() {
         // Read the system variables from the MySQL instance and get the current database name ...
-        Map<String, String> variables = readMySqlCharsetSystemVariables(null);
-        String ddlStatement = setStatementFor(variables);
+        Map<String, String> variables = connectionContext.readMySqlCharsetSystemVariables(null);
+        String ddlStatement = connectionContext.setStatementFor(variables);
 
         // And write them into the database history ...
         dbSchema.applyDdl(source, "", ddlStatement, null);
@@ -130,7 +156,7 @@ public final class MySqlTaskContext extends MySqlJdbcContext {
      */
     public void loadHistory(SourceInfo startingPoint) {
         // Read the system variables from the MySQL instance and load them into the DDL parser as defaults ...
-        Map<String, String> variables = readMySqlCharsetSystemVariables(null);
+        Map<String, String> variables = connectionContext.readMySqlCharsetSystemVariables(null);
         dbSchema.setSystemVariables(variables);
 
         // And then load the history ...
@@ -143,7 +169,7 @@ public final class MySqlTaskContext extends MySqlJdbcContext {
         if (!Strings.equalsIgnoreCase(systemCharsetName, systemCharsetNameFromHistory)) {
             // The history's server character set is NOT the same as the server's current default,
             // so record the change in the history ...
-            String ddlStatement = setStatementFor(variables);
+            String ddlStatement = connectionContext.setStatementFor(variables);
             dbSchema.applyDdl(source, "", ddlStatement, null);
         }
         recordProcessor.regenerate();
@@ -154,39 +180,26 @@ public final class MySqlTaskContext extends MySqlJdbcContext {
      */
     public boolean historyExists() {
         // Read the system variables from the MySQL instance and load them into the DDL parser as defaults ...
-        Map<String, String> variables = readMySqlCharsetSystemVariables(null);
+        Map<String, String> variables = connectionContext.readMySqlCharsetSystemVariables(null);
         dbSchema.setSystemVariables(variables);
 
         // And then load the history ...
        return dbSchema.historyExists();
     }
 
-    public Clock clock() {
-        return clock;
+    /**
+     * Initialize permanent storage for database history
+     */
+    public void initializeHistoryStorage() {
+        dbSchema.intializeHistoryStorage();
     }
 
     public long serverId() {
         return config.getLong(MySqlConnectorConfig.SERVER_ID);
     }
 
-    public String serverName() {
-        return config.getString(MySqlConnectorConfig.SERVER_NAME);
-    }
-
-    public int maxQueueSize() {
-        return config.getInteger(MySqlConnectorConfig.MAX_QUEUE_SIZE);
-    }
-
-    public int maxBatchSize() {
-        return config.getInteger(MySqlConnectorConfig.MAX_BATCH_SIZE);
-    }
-
     public long timeoutInMilliseconds() {
         return config.getLong(MySqlConnectorConfig.CONNECTION_TIMEOUT_MS);
-    }
-
-    public long pollIntervalInMillseconds() {
-        return config.getLong(MySqlConnectorConfig.POLL_INTERVAL_MS);
     }
 
     public long rowCountForLargeTable() {
@@ -199,6 +212,10 @@ public final class MySqlTaskContext extends MySqlJdbcContext {
 
     public boolean includeSchemaChangeRecords() {
         return config.getBoolean(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES);
+    }
+
+    public boolean includeSqlQuery() {
+        return config.getBoolean(MySqlConnectorConfig.INCLUDE_SQL_QUERY);
     }
 
     public boolean isSnapshotAllowedWhenNeeded() {
@@ -226,43 +243,30 @@ public final class MySqlTaskContext extends MySqlJdbcContext {
         return SnapshotMode.parse(value, MySqlConnectorConfig.SNAPSHOT_MODE.defaultValueAsString());
     }
 
-    public boolean useMinimalSnapshotLocking() {
-        return config.getBoolean(MySqlConnectorConfig.SNAPSHOT_MINIMAL_LOCKING);
-    }
-
     public String getSnapshotSelectOverrides() {
         return config.getString(MySqlConnectorConfig.SNAPSHOT_SELECT_STATEMENT_OVERRIDES_BY_TABLE);
     }
 
-    @Override
+    public Duration snapshotDelay() {
+        return Duration.ofMillis(config.getLong(MySqlConnectorConfig.SNAPSHOT_DELAY_MS));
+    }
+
     public void start() {
-        super.start();
+        connectionContext.start();
         // Start the MySQL database history, which simply starts up resources but does not recover the history to a specific point
         dbSchema().start();
     }
 
-    @Override
     public void shutdown() {
         try {
             // Flush and stop the database history ...
-            logger.debug("Stopping database history");
+            LOGGER.debug("Stopping database history");
             dbSchema.shutdown();
         } catch (Throwable e) {
-            logger.error("Unexpected error shutting down the database history", e);
+            LOGGER.error("Unexpected error shutting down the database history", e);
         } finally {
-            super.shutdown();
+            connectionContext.shutdown();
         }
-    }
-
-    /**
-     * Configure the logger's Mapped Diagnostic Context (MDC) properties for the thread making this call.
-     *
-     * @param contextName the name of the context; may not be null
-     * @return the previous MDC context; never null
-     * @throws IllegalArgumentException if {@code contextName} is null
-     */
-    public PreviousContext configureLoggingContext(String contextName) {
-        return LoggingContext.forConnector("MySQL", serverName(), contextName);
     }
 
     /**
@@ -274,7 +278,7 @@ public final class MySqlTaskContext extends MySqlJdbcContext {
      * @throws IllegalArgumentException if any of the parameters are null
      */
     public void temporaryLoggingContext(String contextName, Runnable operation) {
-        LoggingContext.temporarilyForConnector("MySQL", serverName(), contextName, operation);
+        LoggingContext.temporarilyForConnector("MySQL", connectorConfig.getLogicalName(), contextName, operation);
     }
 
     /**
@@ -285,7 +289,7 @@ public final class MySqlTaskContext extends MySqlJdbcContext {
      */
     public ObjectName metricName(String contextName) throws MalformedObjectNameException {
         //return new ObjectName("debezium.mysql:type=connector-metrics,connector=" + serverName() + ",name=" + contextName);
-        return new ObjectName("debezium.mysql:type=connector-metrics,context=" + contextName + ",server=" + serverName());
+        return new ObjectName("debezium.mysql:type=connector-metrics,context=" + contextName + ",server=" + connectorConfig.getLogicalName());
     }
 
     /**
@@ -311,17 +315,17 @@ public final class MySqlTaskContext extends MySqlJdbcContext {
         if (gtidStr == null) {
             return null;
         }
-        logger.info("Attempting to generate a filtered GTID set");
-        logger.info("GTID set from previous recorded offset: {}", gtidStr);
+        LOGGER.info("Attempting to generate a filtered GTID set");
+        LOGGER.info("GTID set from previous recorded offset: {}", gtidStr);
         GtidSet filteredGtidSet = new GtidSet(gtidStr);
         Predicate<String> gtidSourceFilter = gtidSourceFilter();
         if (gtidSourceFilter != null) {
             filteredGtidSet = filteredGtidSet.retainAll(gtidSourceFilter);
-            logger.info("GTID set after applying GTID source includes/excludes to previous recorded offset: {}", filteredGtidSet);
+            LOGGER.info("GTID set after applying GTID source includes/excludes to previous recorded offset: {}", filteredGtidSet);
         }
-        logger.info("GTID set available on server: {}", availableServerGtidSet);
+        LOGGER.info("GTID set available on server: {}", availableServerGtidSet);
         GtidSet mergedGtidSet = availableServerGtidSet.with(filteredGtidSet);
-        logger.info("Final merged GTID set to use when connecting to MySQL: {}", mergedGtidSet);
+        LOGGER.info("Final merged GTID set to use when connecting to MySQL: {}", mergedGtidSet);
         return mergedGtidSet;
     }
 

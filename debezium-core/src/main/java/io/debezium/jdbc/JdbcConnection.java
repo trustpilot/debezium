@@ -14,7 +14,6 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -23,6 +22,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -54,6 +54,7 @@ import io.debezium.util.Strings;
  */
 public class JdbcConnection implements AutoCloseable {
 
+    private static final char STATEMENT_DELIMITER = ';';
     private final static Logger LOGGER = LoggerFactory.getLogger(JdbcConnection.class);
 
     /**
@@ -318,6 +319,14 @@ public class JdbcConnection implements AutoCloseable {
         void accept(ResultSet rs) throws SQLException;
     }
 
+    public static interface ResultSetMapper<T> {
+        T apply(ResultSet rs) throws SQLException;
+    }
+
+    public static interface BlockingResultSetConsumer {
+        void accept(ResultSet rs) throws SQLException, InterruptedException;
+    }
+
     public static interface SingleParameterResultSetConsumer {
         boolean accept(String parameter, ResultSet rs) throws SQLException;
     }
@@ -342,6 +351,20 @@ public class JdbcConnection implements AutoCloseable {
      */
     public JdbcConnection query(String query, ResultSetConsumer resultConsumer) throws SQLException {
         return query(query, Connection::createStatement, resultConsumer);
+    }
+
+    /**
+     * Execute a SQL query and map the result set into an expected type.
+     * @param <T> type returned by the mapper
+     *
+     * @param query the SQL query
+     * @param mapper the function processing the query results
+     * @return the result of the mapper calculation
+     * @throws SQLException if there is an error connecting to the database or executing the statements
+     * @see #execute(Operations)
+     */
+    public <T> T queryAndMap(String query, ResultSetMapper<T> mapper) throws SQLException {
+        return queryAndMap(query, Connection::createStatement, mapper);
     }
 
     /**
@@ -394,6 +417,45 @@ public class JdbcConnection implements AutoCloseable {
     }
 
     /**
+     * Execute a SQL query and map the result set into an expected type.
+     * @param <T> type returned by the mapper
+     *
+     * @param query the SQL query
+     * @param statementFactory the function that should be used to create the statement from the connection; may not be null
+     * @param mapper the function processing the query results
+     * @return the result of the mapper calculation
+     * @throws SQLException if there is an error connecting to the database or executing the statements
+     * @see #execute(Operations)
+     */
+    public <T> T queryAndMap(String query, StatementFactory statementFactory, ResultSetMapper<T> mapper) throws SQLException {
+        Objects.requireNonNull(mapper, "Mapper must be provided");
+        Connection conn = connection();
+        try (Statement statement = statementFactory.createStatement(conn);) {
+            if (LOGGER.isTraceEnabled()) {
+                LOGGER.trace("running '{}'", query);
+            }
+            try (ResultSet resultSet = statement.executeQuery(query);) {
+                return mapper.apply(resultSet);
+            }
+        }
+    }
+
+    public JdbcConnection queryWithBlockingConsumer(String query, StatementFactory statementFactory, BlockingResultSetConsumer resultConsumer) throws SQLException, InterruptedException {
+        Connection conn = connection();
+        try (Statement statement = statementFactory.createStatement(conn);) {
+            if (LOGGER.isTraceEnabled()) {
+                LOGGER.trace("running '{}'", query);
+            }
+            try (ResultSet resultSet = statement.executeQuery(query);) {
+                if (resultConsumer != null) {
+                    resultConsumer.accept(resultSet);
+                }
+            }
+        }
+        return this;
+    }
+
+    /**
      * A function to create a statement from a connection.
      * @author Randall Hauch
      */
@@ -428,6 +490,27 @@ public class JdbcConnection implements AutoCloseable {
             }
         }
         return this;
+    }
+
+    /**
+     * Execute a SQL prepared query and map the result set into an expected type..
+     * @param <T> type returned by the mapper
+     *
+     * @param preparedQueryString the prepared query string
+     * @param preparer the function that supplied arguments to the prepared statement; may not be null
+     * @param resultConsumer the consumer of the query results
+     * @return the result of the mapper calculation
+     * @throws SQLException if there is an error connecting to the database or executing the statements
+     * @see #execute(Operations)
+     */
+    public <T> T prepareQueryAndMap(String preparedQueryString, StatementPreparer preparer, ResultSetMapper<T> mapper)
+            throws SQLException {
+        Objects.requireNonNull(mapper, "Mapper must be provided");
+        final PreparedStatement statement = conn.prepareStatement(preparedQueryString);
+        preparer.accept(statement);
+        try (ResultSet resultSet = statement.executeQuery();) {
+            return mapper.apply(resultSet);
+        }
     }
 
     /**
@@ -563,13 +646,56 @@ public class JdbcConnection implements AutoCloseable {
     }
 
     public synchronized Connection connection() throws SQLException {
+        return connection(true);
+    }
+
+    public synchronized Connection connection(boolean executeOnConnect) throws SQLException {
         if (conn == null) {
             conn = factory.connect(JdbcConfiguration.adapt(config));
             if (conn == null) throw new SQLException("Unable to obtain a JDBC connection");
             // Always run the initial operations on this new connection
             if (initialOps != null) execute(initialOps);
+            final String statements = config.getString(JdbcConfiguration.ON_CONNECT_STATEMENTS);
+            if (statements != null && executeOnConnect) {
+                final List<String> splitStatements = parseSqlStatementString(statements);
+                execute(splitStatements.toArray(new String[splitStatements.size()]));
+            }
         }
         return conn;
+    }
+
+    protected List<String> parseSqlStatementString(final String statements) {
+        final List<String> splitStatements = new ArrayList<>();
+        final char[] statementsChars = statements.toCharArray();
+        StringBuilder activeStatement = new StringBuilder();
+        for (int i = 0; i < statementsChars.length; i++) {
+            if (statementsChars[i] == STATEMENT_DELIMITER) {
+                if (i == statementsChars.length - 1) {
+                    // last character so it is the delimiter
+                }
+                else if (statementsChars[i + 1] == STATEMENT_DELIMITER) {
+                    // two semicolons in a row - escaped semicolon
+                    activeStatement.append(STATEMENT_DELIMITER);
+                    i++;
+                }
+                else {
+                    // semicolon as a delimiter
+                    final String trimmedStatement = activeStatement.toString().trim();
+                    if (!trimmedStatement.isEmpty()) {
+                        splitStatements.add(trimmedStatement);
+                    }
+                    activeStatement = new StringBuilder();
+                }
+            }
+            else {
+                activeStatement.append(statementsChars[i]);
+            }
+        }
+        final String trimmedStatement = activeStatement.toString().trim();
+        if (!trimmedStatement.isEmpty()) {
+            splitStatements.add(trimmedStatement);
+        }
+        return splitStatements;
     }
 
     /**
@@ -711,16 +837,15 @@ public class JdbcConnection implements AutoCloseable {
     }
 
     /**
-     * Resolves the underlying value type for column types where the JDBC type is generic (such as Types.ARRAY and Types.STRUCT).
+     * Provides a native type for the given type name.
      *
      * There isn't a standard way to obtain this information via JDBC APIs so this method exists to allow
      * database specific information to be set in addition to the JDBC Type.
      *
-     * @param rs the result set returned by DatabaseMetadata.getColumns at the current record.  Overrides should not
-     *           call next() on this instance or otherwise mutate it.
+     * @param typeName the name of the type whose native type we are looking for
      * @return A type constant for the specific database or -1.
      */
-    protected int resolveComponentType(ResultSet rs) {
+    protected int resolveNativeType(String typeName) {
         return Column.UNSET_INT_VALUE;
     }
 
@@ -779,7 +904,9 @@ public class JdbcConnection implements AutoCloseable {
                         column.jdbcType(rs.getInt(5));
                         column.type(rs.getString(6));
                         column.length(rs.getInt(7));
-                        column.scale(rs.getInt(9));
+                        if (rs.getObject(9) != null) {
+                            column.scale(rs.getInt(9));
+                        }
                         column.optional(isNullable(rs.getInt(11)));
                         column.position(rs.getInt(17));
                         column.autoIncremented("YES".equalsIgnoreCase(rs.getString(23)));
@@ -791,9 +918,7 @@ public class JdbcConnection implements AutoCloseable {
                         }
                         column.generated("YES".equalsIgnoreCase(autogenerated));
 
-                        if (column.jdbcType() == Types.ARRAY) {
-                            column.componentType(resolveComponentType(rs));
-                        }
+                        column.nativeType(resolveNativeType(column.typeName()));
 
                         cols.add(column.create());
                     }
@@ -826,23 +951,6 @@ public class JdbcConnection implements AutoCloseable {
             tableIdsBefore.removeAll(columnsByTable.keySet());
             tableIdsBefore.forEach(tables::removeTable);
         }
-    }
-
-    /**
-     * Returns a map which contains information about how a database maps it's data types to JDBC data types.
-     *
-     * @return a {@link Map map of (localTypeName, jdbcType) pairs}
-     * @throws SQLException if anything unexpected fails
-     */
-    public Map<String, Integer> readTypeInfo() throws SQLException {
-        DatabaseMetaData metadata = connection().getMetaData();
-        Map<String, Integer> jdbcTypeByLocalTypeName = new HashMap<>();
-        try (ResultSet rs = metadata.getTypeInfo()) {
-           while (rs.next()) {
-               jdbcTypeByLocalTypeName.put(rs.getString("TYPE_NAME"), rs.getInt("DATA_TYPE"));
-           }
-        }
-        return jdbcTypeByLocalTypeName;
     }
 
     /**

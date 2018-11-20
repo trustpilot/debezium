@@ -8,11 +8,7 @@ package io.debezium.connector.postgresql;
 
 import java.sql.SQLException;
 import java.time.ZoneOffset;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.function.Function;
 import java.util.function.Predicate;
-import java.util.stream.Stream;
 
 import org.apache.kafka.connect.data.Schema;
 import org.slf4j.Logger;
@@ -22,12 +18,13 @@ import io.debezium.annotation.NotThreadSafe;
 import io.debezium.connector.postgresql.connection.PostgresConnection;
 import io.debezium.connector.postgresql.connection.ServerInfo;
 import io.debezium.jdbc.JdbcConnection;
+import io.debezium.relational.RelationalDatabaseSchema;
 import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
-import io.debezium.relational.TableSchema;
 import io.debezium.relational.TableSchemaBuilder;
 import io.debezium.relational.Tables;
-import io.debezium.util.AvroValidator;
+import io.debezium.schema.TopicSelector;
+import io.debezium.util.SchemaNameAdjuster;
 
 /**
  * Component that records the schema information for the {@link PostgresConnector}. The schema information contains
@@ -38,43 +35,34 @@ import io.debezium.util.AvroValidator;
  * @author Horia Chiorean
  */
 @NotThreadSafe
-public class PostgresSchema {
+public class PostgresSchema extends RelationalDatabaseSchema {
 
     protected final static String PUBLIC_SCHEMA_NAME = "public";
     private final static Logger LOGGER = LoggerFactory.getLogger(PostgresSchema.class);
 
-    private final Map<TableId, TableSchema> tableSchemaByTableId = new HashMap<>();
     private final Filters filters;
-    private final TableSchemaBuilder schemaBuilder;
-    private final String schemaPrefix;
-    private final Tables tables;
-    private final Function<String, String> schemaNameValidator;
-    private final PostgresValueConverter valueConverter;
 
-    private Map<String, Integer> typeInfo;
+    private final TypeRegistry typeRegistry;
 
     /**
      * Create a schema component given the supplied {@link PostgresConnectorConfig Postgres connector configuration}.
      *
      * @param config the connector configuration, which is presumed to be valid
      */
-    protected PostgresSchema(PostgresConnectorConfig config) {
+    protected PostgresSchema(PostgresConnectorConfig config, TypeRegistry typeRegistry,
+            TopicSelector<TableId> topicSelector) {
+        super(config, topicSelector, new Filters(config).tableFilter(),
+                new Filters(config).columnFilter(), getTableSchemaBuilder(config, typeRegistry), false);
+
         this.filters = new Filters(config);
-        this.tables = new Tables();
+        this.typeRegistry = typeRegistry;
+    }
 
-        this.valueConverter = new PostgresValueConverter(config.decimalHandlingMode(), config.temporalPrecisionMode(),
-                ZoneOffset.UTC, null, config.includeUnknownDatatypes(), this);
-        this.schemaNameValidator = AvroValidator.create(LOGGER)::validate;
-        this.schemaBuilder = new TableSchemaBuilder(valueConverter, this.schemaNameValidator);
+    private static TableSchemaBuilder getTableSchemaBuilder(PostgresConnectorConfig config, TypeRegistry typeRegistry) {
+        PostgresValueConverter valueConverter = new PostgresValueConverter(config.decimalHandlingMode(), config.temporalPrecisionMode(),
+                ZoneOffset.UTC, null, config.includeUnknownDatatypes(), typeRegistry);
 
-        // Set up the server name and schema prefix ...
-        String serverName = config.serverName();
-        if (serverName == null) {
-            schemaPrefix = "";
-        } else {
-            serverName = serverName.trim();
-            this.schemaPrefix = serverName.endsWith(".") || serverName.isEmpty() ? serverName : serverName + ".";
-        }
+        return new TableSchemaBuilder(valueConverter, SchemaNameAdjuster.create(LOGGER), SourceInfo.SCHEMA);
     }
 
     /**
@@ -86,15 +74,11 @@ public class PostgresSchema {
      * @throws SQLException if there is a problem obtaining the schema from the database server
      */
     protected PostgresSchema refresh(PostgresConnection connection, boolean printReplicaIdentityInfo) throws SQLException {
-        if (typeInfo == null) {
-            typeInfo = connection.readTypeInfo();
-        }
-
         // read all the information from the DB
-        connection.readSchema(tables, null, null, filters.tableNameFilter(), null, true);
+        connection.readSchema(tables(), null, null, filters.tableNameFilter(), null, true);
         if (printReplicaIdentityInfo) {
             // print out all the replica identity info
-            tables.tableIds().forEach(tableId -> printReplicaIdentityInfo(connection, tableId));
+            tableIds().forEach(tableId -> printReplicaIdentityInfo(connection, tableId));
         }
         // and then refresh the schemas
         refreshSchemas();
@@ -125,7 +109,7 @@ public class PostgresSchema {
         // we expect the refreshed table to be there
         assert temp.size() == 1;
         // overwrite (add or update) or views of the tables
-        tables.overwriteTable(temp.forTable(tableId));
+        tables().overwriteTable(temp.forTable(tableId));
         // and refresh the schema
         refreshSchema(tableId);
     }
@@ -137,72 +121,32 @@ public class PostgresSchema {
      */
     protected void refresh(Table table) {
         // overwrite (add or update) or views of the tables
-        tables.overwriteTable(table);
+        tables().overwriteTable(table);
         // and refresh the schema
         refreshSchema(table.id());
-    }
-
-    /**
-     * Get the {@link Filters database and table filters} defined by the configuration.
-     *
-     * @return the filters; never null
-     */
-    public Filters filters() {
-        return filters;
-    }
-
-    /**
-     * Get the {@link TableSchema Schema information} for the table with the given identifier, if that table exists and is
-     * included by the {@link #filters() filter}.
-     *
-     * @param id the fully-qualified table identifier; may be null
-     * @return the current table definition, or null if there is no table with the given identifier, if the identifier is null,
-     *         or if the table has been excluded by the filters
-     */
-    public Table tableFor(TableId id) {
-        return filters.tableFilter().test(id) ? tables.forTable(id) : null;
-    }
-
-    protected String validateSchemaName(String name) {
-        return this.schemaNameValidator.apply(name);
-    }
-
-    protected TableSchema schemaFor(TableId id) {
-        return tableSchemaByTableId.get(id);
     }
 
     protected boolean isFilteredOut(TableId id) {
         return !filters.tableFilter().test(id);
     }
 
-    protected boolean isJdbcType(String localTypeName, int jdbcType) {
-        return typeInfo != null && columnTypeNameToJdbcTypeId(localTypeName) == jdbcType;
-    }
-
-    protected int columnTypeNameToJdbcTypeId(String localTypeName) {
-        return typeInfo.get(localTypeName);
-    }
-
-    protected Stream<TableId> tables() {
-        return tables.tableIds().stream();
-    }
-
     /**
      * Discard any currently-cached schemas and rebuild them using the filters.
      */
     protected void refreshSchemas() {
-        tableSchemaByTableId.clear();
+        clearSchemas();
+
         // Create TableSchema instances for any existing table ...
-        this.tables.tableIds().forEach(this::refreshSchema);
+        tableIds().forEach(this::refreshSchema);
     }
 
     private void refreshSchema(TableId id) {
         if (LOGGER.isDebugEnabled()) {
             LOGGER.debug("refreshing DB schema for table '{}'", id);
         }
-        Table table = this.tables.forTable(id);
-        TableSchema schema = schemaBuilder.create(schemaPrefix, table, filters.columnFilter(), null);
-        tableSchemaByTableId.put(id, schema);
+        Table table = tableFor(id);
+
+        buildAndRegisterSchema(table);
     }
 
     protected static TableId parse(String table) {
@@ -211,5 +155,9 @@ public class PostgresSchema {
             return null;
         }
         return tableId.schema() == null ? new TableId(tableId.catalog(), PUBLIC_SCHEMA_NAME, tableId.table()) : tableId;
+    }
+
+    public TypeRegistry getTypeRegistry() {
+        return typeRegistry;
     }
 }

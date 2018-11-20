@@ -10,9 +10,11 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -27,7 +29,7 @@ public class Collect {
      * map will be able to contain no more than {@code maximumNumberOfEntries} entries, but the underlying map will have a
      * capacity that is the next power of larger than the supplied {@code maximumNumberOfEntries} value so that it can hold
      * the required number of entries.
-     * 
+     *
      * @param maximumNumberOfEntries the maximum number of entries allowed in the map; should be a power of 2
      * @return the map that is limited in size by the specified number of entries; never null
      */
@@ -80,6 +82,15 @@ public class Collect {
 
     public static <T> Set<T> unmodifiableSet(Set<T> values) {
         return Collections.unmodifiableSet(values);
+    }
+
+    public static <T> Set<T> unmodifiableSet(Iterator<T> values) {
+        Set<T> set = new HashSet<>();
+        while (values.hasNext()) {
+            set.add(values.next());
+        }
+
+        return Collections.unmodifiableSet(set);
     }
 
     public static <T> List<T> arrayListOf(T[] values) {
@@ -161,7 +172,6 @@ public class Collect {
         return map;
     }
 
-
     public static <K, V> Map<K, V> linkMapOf(K key, V value) {
         Map<K, V> map = new LinkedHashMap<>();
         map.put(key, value);
@@ -192,11 +202,62 @@ public class Collect {
         return map;
     }
 
+    public static Properties propertiesOf(String key, String value) {
+        Properties props = new Properties();
+        props.put(key, value);
+        return props;
+    }
+
+    public static Properties propertiesOf(String key1, String value1, String key2, String value2) {
+        Properties props = new Properties();
+        props.put(key1, value1);
+        props.put(key2, value2);
+        return props;
+    }
+
+    public static Properties propertiesOf(String key1, String value1, String key2, String value2, String key3, String value3) {
+        Properties props = new Properties();
+        props.put(key1, value1);
+        props.put(key2, value2);
+        props.put(key3, value3);
+        return props;
+    }
+
+    public static Properties propertiesOf(String key1, String value1, String key2, String value2, String key3, String value3, String key4, String value4) {
+        Properties props = new Properties();
+        props.put(key1, value1);
+        props.put(key2, value2);
+        props.put(key3, value3);
+        props.put(key4, value4);
+        return props;
+    }
+
+    public static Properties propertiesOf(String key1, String value1, String key2, String value2, String key3, String value3, String key4, String value4, String key5, String value5) {
+        Properties props = new Properties();
+        props.put(key1, value1);
+        props.put(key2, value2);
+        props.put(key3, value3);
+        props.put(key4, value4);
+        props.put(key5, value5);
+        return props;
+    }
+
+    public static Properties propertiesOf(String key1, String value1, String key2, String value2, String key3, String value3, String key4, String value4, String key5, String value5, String key6, String value6) {
+        Properties props = new Properties();
+        props.put(key1, value1);
+        props.put(key2, value2);
+        props.put(key3, value3);
+        props.put(key4, value4);
+        props.put(key5, value5);
+        props.put(key6, value6);
+        return props;
+    }
+
     /**
      * Set the value at the given position in the list, expanding the list as required to accommodate the new position.
      * <p>
      * This is not a thread-safe operation
-     * 
+     *
      * @param list the list to be modified
      * @param index the index position of the new value
      * @param value the value

@@ -5,6 +5,8 @@
  */
 package io.debezium.transforms;
 
+import static org.fest.assertions.Assertions.assertThat;
+
 import java.util.HashMap;
 import java.util.Map;
 
@@ -23,6 +25,7 @@ public class UnwrapFromEnvelopeTest {
 
     private static final String DROP_DELETES = "drop.deletes";
     private static final String DROP_TOMBSTONES = "drop.tombstones";
+    private static final String HANDLE_DELETES = "delete.handling.mode";
 
     @Test
     public void testTombstoneDroppedByDefault() {
@@ -31,7 +34,7 @@ public class UnwrapFromEnvelopeTest {
             transform.configure(props);
 
             final SourceRecord tombstone = new SourceRecord(new HashMap<>(), new HashMap<>(), "dummy", null, null);
-            assert transform.apply(tombstone) == null;
+            assertThat(transform.apply(tombstone)).isNull();
         }
     }
 
@@ -43,7 +46,7 @@ public class UnwrapFromEnvelopeTest {
             transform.configure(props);
 
             final SourceRecord tombstone = new SourceRecord(new HashMap<>(), new HashMap<>(), "dummy", null, null);
-            assert transform.apply(tombstone) == null;
+            assertThat(transform.apply(tombstone)).isNull();
         }
     }
 
@@ -55,7 +58,7 @@ public class UnwrapFromEnvelopeTest {
             transform.configure(props);
 
             final SourceRecord tombstone = new SourceRecord(new HashMap<>(), new HashMap<>(), "dummy", null, null);
-            assert transform.apply(tombstone) == tombstone;
+            assertThat(transform.apply(tombstone)).isEqualTo(tombstone);
         }
     }
 
@@ -110,7 +113,7 @@ public class UnwrapFromEnvelopeTest {
             transform.configure(props);
 
             final SourceRecord deleteRecord = createDeleteRecord();
-            assert transform.apply(deleteRecord) == null;
+            assertThat(transform.apply(deleteRecord)).isNull();
         }
     }
 
@@ -122,7 +125,7 @@ public class UnwrapFromEnvelopeTest {
             transform.configure(props);
 
             final SourceRecord deleteRecord = createDeleteRecord();
-            assert transform.apply(deleteRecord) == null;
+            assertThat(transform.apply(deleteRecord)).isNull();
         }
     }
 
@@ -135,7 +138,58 @@ public class UnwrapFromEnvelopeTest {
 
             final SourceRecord deleteRecord = createDeleteRecord();
             final SourceRecord tombstone = transform.apply(deleteRecord);
-            assert tombstone.value() == null;
+            assertThat(tombstone.value()).isNull();
+        }
+    }
+
+    @Test
+    public void testHandleDeleteDrop() {
+        try (final UnwrapFromEnvelope<SourceRecord> transform = new UnwrapFromEnvelope<>()) {
+            final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_DELETES, "drop");
+            transform.configure(props);
+
+            final SourceRecord deleteRecord = createDeleteRecord();
+            assertThat(transform.apply(deleteRecord)).isNull();
+        }
+    }
+
+    @Test
+    public void testHandleDeleteNone() {
+        try (final UnwrapFromEnvelope<SourceRecord> transform = new UnwrapFromEnvelope<>()) {
+            final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_DELETES, "none");
+            transform.configure(props);
+
+            final SourceRecord deleteRecord = createDeleteRecord();
+            final SourceRecord tombstone = transform.apply(deleteRecord);
+            assertThat(tombstone.value()).isNull();
+        }
+    }
+
+    @Test
+    public void testHandleDeleteRewrite() {
+        try (final UnwrapFromEnvelope<SourceRecord> transform = new UnwrapFromEnvelope<>()) {
+            final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_DELETES, "rewrite");
+            transform.configure(props);
+
+            final SourceRecord deleteRecord = createDeleteRecord();
+            final SourceRecord unwrapped = transform.apply(deleteRecord);
+            assertThat(((Struct)unwrapped.value()).getString("__deleted")).isEqualTo("true");
+        }
+    }
+
+    @Test
+    public void testHandleCreateRewrite() {
+        try (final UnwrapFromEnvelope<SourceRecord> transform = new UnwrapFromEnvelope<>()) {
+            final Map<String, String> props = new HashMap<>();
+            props.put(HANDLE_DELETES, "rewrite");
+            transform.configure(props);
+
+            final SourceRecord createRecord = createCreateRecord();
+            final SourceRecord unwrapped = transform.apply(createRecord);
+            assertThat(((Struct)unwrapped.value()).getString("__deleted")).isEqualTo("false");
         }
     }
 
@@ -147,7 +201,7 @@ public class UnwrapFromEnvelopeTest {
 
             final SourceRecord createRecord = createCreateRecord();
             final SourceRecord unwrapped = transform.apply(createRecord);
-            assert ((Struct)unwrapped.value()).getInt8("id") == 1;
+            assertThat(((Struct)unwrapped.value()).getInt8("id")).isEqualTo((byte) 1);
         }
     }
 
@@ -158,10 +212,10 @@ public class UnwrapFromEnvelopeTest {
             transform.configure(props);
 
             final SourceRecord unknownRecord = createUnknownRecord();
-            assert transform.apply(unknownRecord) == unknownRecord;
+            assertThat(transform.apply(unknownRecord)).isEqualTo(unknownRecord);
 
             final SourceRecord unnamedSchemaRecord = createUnknownUnnamedSchemaRecord();
-            assert transform.apply(unnamedSchemaRecord) == unnamedSchemaRecord;
+            assertThat(transform.apply(unnamedSchemaRecord)).isEqualTo(unnamedSchemaRecord);
         }
     }
 }
