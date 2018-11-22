@@ -10,7 +10,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>io.debezium</groupId>
     <artifactId>debezium-parent</artifactId>
-    <version>0.8.3.Final</version>
+    <version>0.8.3.Final.tp-SANPSHOT</version>
     <name>Debezium Parent POM</name>
     <description>Debezium is an open source change data capture platform</description>
     <packaging>pom</packaging>
@@ -49,6 +49,7 @@
         </developer>
     </developers>
     <properties>
+        <original.debezium.version>0.8.3.Final</original.debezium.version>
         <!-- Instruct the build to use only UTF-8 encoding for source code -->
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>1.8</maven.compiler.source>
@@ -315,56 +316,56 @@
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-core</artifactId>
-                <version>${project.version}</version>
+                <version>${original.debezium.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-embedded</artifactId>
-                <version>${project.version}</version>
+                <version>${original.debezium.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-connector-jdbc</artifactId>
-                <version>${project.version}</version>
+                <version>${original.debezium.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-connector-postgres</artifactId>
-                <version>${project.version}</version>
+                <version>${original.debezium.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-connector-postgres-test</artifactId>
-                <version>${project.version}</version>
+                <version>${original.debezium.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-connector-mysql</artifactId>
-                <version>${project.version}</version>
+                <version>${original.debezium.version}</version>
             </dependency>
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-ddl-parser</artifactId>
-                <version>${project.version}</version>
+                <version>${original.debezium.version}</version>
             </dependency>
 
             <!-- Debezium test artifacts -->
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-core</artifactId>
-                <version>${project.version}</version>
+                <version>${original.debezium.version}</version>
                 <type>test-jar</type>
             </dependency>
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-embedded</artifactId>
-                <version>${project.version}</version>
+                <version>${original.debezium.version}</version>
                 <type>test-jar</type>
             </dependency>
             <dependency>
                 <groupId>io.debezium</groupId>
                 <artifactId>debezium-connector-mysql</artifactId>
-                <version>${project.version}</version>
+                <version>${original.debezium.version}</version>
                 <type>test-jar</type>
             </dependency>
 
