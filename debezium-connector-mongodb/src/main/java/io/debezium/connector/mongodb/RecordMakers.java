@@ -126,6 +126,8 @@ public class RecordMakers {
             this.emitTombstonesOnDelete = emitTombstonesOnDelete;
         }
 
+
+
         /**
          * Get the identifier of the collection to which this producer applies.
          *
@@ -133,6 +135,25 @@ public class RecordMakers {
          */
         public CollectionId collectionId() {
             return collectionId;
+        }
+
+        /**
+         * Generate and record one or more source records to describe the given object.
+         *
+         * @param id the identifier of the collection in which the document exists; may not be null
+         * @param object the document; may not be null
+         * @param timestamp the timestamp at which this operation is occurring
+         * @param docsSynced number of documents synced
+         * @return the number of source records that were generated; will be 0 or more
+         * @throws InterruptedException if the calling thread was interrupted while waiting to submit a record to
+         *             the blocking consumer
+         */
+        public int recordObject(CollectionId id, Document object, long timestamp, long docsSynced) throws InterruptedException {
+            final Struct sourceValue = source.lastOffsetStruct(replicaSetName, id, docsSynced);
+            final Map<String, ?> offset = source.lastOffset(replicaSetName);
+            String objId = idObjToJson(object);
+            assert objId != null;
+            return createRecords(sourceValue, offset, Operation.READ, objId, object, timestamp);
         }
 
         /**
