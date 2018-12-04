@@ -371,7 +371,6 @@ public final class SourceInfo extends AbstractSourceInfo {
         return initialSyncReplicaSets.contains(replicaSetName);
     }
 
-
     private static int intOffsetValue(Map<String, ?> values, String key) {
         Object obj = values.get(key);
         if (obj == null) return 0;

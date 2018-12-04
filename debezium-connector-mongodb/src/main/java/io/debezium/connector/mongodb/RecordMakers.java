@@ -126,8 +126,6 @@ public class RecordMakers {
             this.emitTombstonesOnDelete = emitTombstonesOnDelete;
         }
 
-
-
         /**
          * Get the identifier of the collection to which this producer applies.
          *
