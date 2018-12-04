@@ -108,7 +108,6 @@ public final class SourceInfo extends AbstractSourceInfo {
         private final Long opId;
         private final BsonTimestamp ts;
 
-
         public Position(int ts, int order, Long opId) {
             this(new BsonTimestamp(ts, order), opId);
         }
