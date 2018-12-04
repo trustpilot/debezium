@@ -77,6 +77,7 @@ public final class SourceInfo extends AbstractSourceInfo {
     public static final String ORDER = "ord";
     public static final String OPERATION_ID = "h";
     public static final String INITIAL_SYNC = "initsync";
+    public static final String DOCS_SYNCED = "docs_synced";
 
     private static final BsonTimestamp INITIAL_TIMESTAMP = new BsonTimestamp();
     private static final Position INITIAL_POSITION = new Position(INITIAL_TIMESTAMP, null);
@@ -95,6 +96,7 @@ public final class SourceInfo extends AbstractSourceInfo {
                                                       .field(ORDER, Schema.INT32_SCHEMA)
                                                       .field(OPERATION_ID, Schema.OPTIONAL_INT64_SCHEMA)
                                                       .field(INITIAL_SYNC, SchemaBuilder.bool().optional().defaultValue(false).build())
+                                                      .field(DOCS_SYNCED, Schema.OPTIONAL_INT64_SCHEMA)
                                                       .build();
 
     private final ConcurrentMap<String, Map<String, String>> sourcePartitionsByReplicaSetName = new ConcurrentHashMap<>();
@@ -221,7 +223,22 @@ public final class SourceInfo extends AbstractSourceInfo {
      */
     public Struct lastOffsetStruct(String replicaSetName, CollectionId collectionId) {
         return offsetStructFor(replicaSetName, collectionId.namespace(), positionsByReplicaSetName.get(replicaSetName),
-                               isInitialSyncOngoing(replicaSetName));
+                               isInitialSyncOngoing(replicaSetName), -1);
+    }
+
+    /**
+     * Get a {@link Struct} representation of the source {@link #partition(String) partition} and {@link #lastOffset(String)
+     * offset} information where we have last read. The Struct complies with the {@link #schema} for the MongoDB connector.
+     *
+     * @param replicaSetName the name of the replica set name for which the new offset is to be obtained; may not be null
+     * @param collectionId the event's collection identifier; may not be null
+     * @param docsSynced number of documents synced
+     * @return the source partition and offset {@link Struct}; never null
+     * @see #schema()
+     */
+    public Struct lastOffsetStruct(String replicaSetName, CollectionId collectionId, long docsSynced) {
+        return offsetStructFor(replicaSetName, collectionId.namespace(), positionsByReplicaSetName.get(replicaSetName),
+                isInitialSyncOngoing(replicaSetName), docsSynced);
     }
 
     /**
@@ -244,7 +261,7 @@ public final class SourceInfo extends AbstractSourceInfo {
             namespace = oplogEvent.getString("ns");
         }
         positionsByReplicaSetName.put(replicaSetName, position);
-        return offsetStructFor(replicaSetName, namespace, position, isInitialSyncOngoing(replicaSetName));
+        return offsetStructFor(replicaSetName, namespace, position, isInitialSyncOngoing(replicaSetName), -1);
     }
 
     /**
@@ -257,7 +274,7 @@ public final class SourceInfo extends AbstractSourceInfo {
         return oplogEvent != null ? oplogEvent.get("ts", BsonTimestamp.class) : null;
     }
 
-    private Struct offsetStructFor(String replicaSetName, String namespace, Position position, boolean isInitialSync) {
+    private Struct offsetStructFor(String replicaSetName, String namespace, Position position, boolean isInitialSync, long docsSynced) {
         if (position == null) position = INITIAL_POSITION;
         Struct result = super.struct();
         result.put(SERVER_NAME, serverName);
@@ -268,6 +285,9 @@ public final class SourceInfo extends AbstractSourceInfo {
         result.put(OPERATION_ID, position.getOperationId());
         if (isInitialSync) {
             result.put(INITIAL_SYNC, true);
+        }
+        if (docsSynced > 0) {
+            result.put(DOCS_SYNCED, docsSynced);
         }
         return result;
     }
