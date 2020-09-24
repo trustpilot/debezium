@@ -5,6 +5,7 @@
  */
 package io.debezium.connector.mongodb;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Function;
@@ -41,11 +42,18 @@ import io.debezium.util.SchemaNameAdjuster;
 public class RecordMakers {
 
     private static final ObjectSerializer jsonSerializer = JSONSerializers.getStrict();
-    private static final Map<String, Operation> operationLiterals = new HashMap<>();
+
+    @ThreadSafe
+    private static final Map<String, Operation> OPERATION_LITERALS;
+
     static {
-        operationLiterals.put("i", Operation.CREATE);
-        operationLiterals.put("u", Operation.UPDATE);
-        operationLiterals.put("d", Operation.DELETE);
+        Map<String, Operation> literals = new HashMap<>();
+
+        literals.put("i", Operation.CREATE);
+        literals.put("u", Operation.UPDATE);
+        literals.put("d", Operation.DELETE);
+
+        OPERATION_LITERALS = Collections.unmodifiableMap(literals);
     }
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
@@ -188,7 +196,7 @@ public class RecordMakers {
             Object o2 = oplogEvent.get("o2");
             String objId = o2 != null ? idObjToJson(o2) : idObjToJson(patchObj);
             assert objId != null;
-            Operation operation = operationLiterals.get(oplogEvent.getString("op"));
+            Operation operation = OPERATION_LITERALS.get(oplogEvent.getString("op"));
             return createRecords(sourceValue, offset, operation, objId, patchObj, timestamp);
         }
 
@@ -255,4 +263,9 @@ public class RecordMakers {
         logger.debug("Clearing table converters");
         recordMakerByCollectionId.clear();
     }
+
+    public static boolean isValidOperation(String operation) {
+        return OPERATION_LITERALS.containsKey(operation);
+    }
+
 }

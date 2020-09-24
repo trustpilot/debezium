@@ -437,6 +437,11 @@ public class Replicator {
             logger.warn("Missing 'o' field in event, so skipping {}", event.toJson());
             return true;
         }
+
+        if (!eventOpIsSupported(event)) {
+            return true;
+        }
+
         if (ns == null || ns.isEmpty()) {
             // These are replica set events ...
             String msg = object.getString("msg");
@@ -522,6 +527,11 @@ public class Replicator {
     static {
         mongoDbUpdateOperators.add("$set");
         mongoDbUpdateOperators.add("$unset");
+    }
+
+    private boolean eventOpIsSupported(Document event) {
+        String op = event.getString("op");
+        return RecordMakers.isValidOperation(op);
     }
 
     private boolean eventIsMongoDbUpdateOperator(Document event){
