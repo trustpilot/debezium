@@ -74,7 +74,7 @@
         <version.mongo.driver>3.9.0</version.mongo.driver>
 
         <!-- Connectors -->
-        <version.com.google.protobuf>2.6.1</version.com.google.protobuf>
+        <version.com.google.protobuf>3.16.1</version.com.google.protobuf>
 
         <!-- ANTLR -->
         <antlr.version>4.7</antlr.version>
